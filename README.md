@@ -17,7 +17,7 @@ The [`overleaf-workshop`](https://github.com/overleaf-workshop/overleaf-workshop
 
 ## Status
 
-Working end-to-end against `overleaf.com` — 16 tools, tracked-changes edits and review-panel comments both verified. Published on npm as [`@netique/overleaf-mcp`](https://www.npmjs.com/package/@netique/overleaf-mcp).
+Working end-to-end against `overleaf.com` — 18 tools, tracked-changes edits and review-panel comments both verified. Published on npm as [`@netique/overleaf-mcp`](https://www.npmjs.com/package/@netique/overleaf-mcp).
 
 ## Tools
 
@@ -35,6 +35,7 @@ Working end-to-end against `overleaf.com` — 16 tools, tracked-changes edits an
 | `reject_changes` | Rejects one or more tracked changes by `change_id`. Implemented as `applyOtUpdate` with the inverse op + `u:true` (same pathway Overleaf's web client uses). Irreversible. |
 | `compile` | Triggers an Overleaf compile and returns a unified summary: `status`, `built_cleanly` (true iff PDF + zero LaTeX errors), `error_count`, `warning_count`, `first_errors` (sample), `output_files`, timings. Already fetches and parses `output.log` inline — no extra `read_log` call needed for the happy path. Pass `root_doc`, `draft`, `stop_on_first_error` to control. |
 | `read_log` | Returns the full `output.log` from the most recent compile, with `!`-prefixed error lines surfaced at the top. Use when `compile`'s inline summary isn't enough context. |
+| `download_pdf` | Downloads the open project's most recently compiled `output.pdf` to an absolute local `output_path`. Checks the PDF signature and refuses to replace existing files unless `overwrite: true`. Call `compile` in the same MCP session first; it does not recompile automatically. |
 | `list_comments` | Lists review-panel comment threads with doc path, quoted text, author, latest-message preview. Supports `include_resolved`, `path_contains`, `full`. |
 | `read_comment_thread` | Returns the full message history of one thread. |
 | `reply_comment` | Posts a new message to an existing thread. |
@@ -50,6 +51,7 @@ Things to ask Claude once `overleaf-mcp` is connected:
 - _"Open my thesis project and show me what comments my collaborators have left."_
 - _"Read intro.tex and fix the missing comma in the second paragraph."_  → with track-changes on, this lands as a tracked suggestion.
 - _"Compile the project and tell me what the LaTeX errors mean."_  → uses `compile` then `read_log` automatically.
+- _"Compile my paper and download the PDF to an absolute path on my computer."_ → `open_project` → `compile(root_doc: "main.tex")` → `download_pdf(output_path: "D:\\papers\\paper.pdf")`. For a response letter, compile with `root_doc: "response_letter.tex"` before downloading. The destination is on the computer running the MCP server; parent directories are created. Recompile if cached build output has expired or the source has changed. Check `built_cleanly` first if a PDF with LaTeX errors is unacceptable.
 - _"For each open comment thread, suggest a fix and reply with what you did."_  → end-to-end review workflow.
 
 ## Requirements

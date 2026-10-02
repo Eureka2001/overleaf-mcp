@@ -11,6 +11,7 @@ coverage/
 # Claude Code per-project state (session transcripts, scratch settings).
 # Project conventions for Claude live in CLAUDE.md (which IS tracked).
 .claude/
+.planning/
 
 # Knitr / Pandoc / markdown-preview output bundles next to README.md.
 README_files/

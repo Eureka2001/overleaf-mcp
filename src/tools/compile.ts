@@ -37,7 +37,7 @@ export function summarizeErrors(
 
 // Build the GET-able URL for an output file from a compile response, including
 // the clsiserverid + compileGroup query params CLSI requires.
-function buildOutputUrl(file: OutputFile, last: CompileResponse): string {
+export function buildOutputUrl(file: OutputFile, last: CompileResponse): string {
   const params = new URLSearchParams();
   if (last.clsiServerId) params.set("clsiserverid", last.clsiServerId);
   if (last.compileGroup) params.set("compileGroup", last.compileGroup);

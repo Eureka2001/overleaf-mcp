@@ -11,6 +11,7 @@ import { registerReadFile } from "./tools/readFile.js";
 import { registerEditFile } from "./tools/editFile.js";
 import { registerFindAndReplace } from "./tools/findAndReplace.js";
 import { registerCompile, registerReadLog } from "./tools/compile.js";
+import { registerDownloadPdf } from "./tools/downloadPdf.js";
 import { registerComments } from "./tools/comments.js";
 import { registerTrackedChanges } from "./tools/trackedChanges.js";
 import { close as closeActiveProject } from "./session/activeProject.js";
@@ -34,6 +35,7 @@ const INSTRUCTIONS = [
   "  2. open_project(id) -> joins the Socket.IO room, returns file tree + tc state",
   "  3. read_file / edit_file by path (e.g. 'chapters/intro.tex')",
   "  4. compile to verify edits build",
+  "  5. download_pdf(output_path) to save the last compiled PDF locally",
   "",
   "Auth UX (important for the user-facing message):",
   "If no session cookie is stored yet, or the previous one has expired (Overleaf",
@@ -74,6 +76,7 @@ async function main(): Promise<void> {
   registerFindAndReplace(server);
   registerCompile(server);
   registerReadLog(server);
+  registerDownloadPdf(server);
   registerComments(server);
   registerTrackedChanges(server);
 

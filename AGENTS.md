@@ -6,7 +6,7 @@ Context for Agents (or any future contributor) working in this repo. Read top to
 
 `overleaf-mcp` is an MCP server for Overleaf. It speaks Overleaf's Socket.IO web API (the same channel the official editor uses), **not** the Git bridge. The headline feature: edits land as **tracked changes** in Overleaf's Review panel — every other Overleaf MCP punts to the Git bridge and silently overwrites, which makes them unusable for collaborative academic work.
 
-Tools (17): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, `edit_file`, `find_and_replace`, `compile`, `read_log`, `list_comments`, `read_comment_thread`, `reply_comment`, `resolve_comment`, `reopen_comment`, `list_tracked_changes`, `accept_changes`, `reject_changes`.
+Tools (18): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, `edit_file`, `find_and_replace`, `compile`, `read_log`, `download_pdf`, `list_comments`, `read_comment_thread`, `reply_comment`, `resolve_comment`, `reopen_comment`, `list_tracked_changes`, `accept_changes`, `reject_changes`.
 
 ## Architecture you should know about before changing things
 
@@ -30,6 +30,8 @@ Tools (17): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, 
 
 - **`compile.status === "success"` is misleading** — Overleaf returns it whenever a PDF is generated, even with LaTeX errors (TeX runs in `nonstopmode`). Truthful check is `compile.built_cleanly` (PDF + zero `! `-prefixed log lines). `compile` already fetches `output.log` inline; `read_log` is for deeper inspection.
 
+- **`download_pdf` downloads the last build in the same MCP session**, using the cached `output.pdf` URL plus `clsiserverid` / `compileGroup` through `olGet`. It does not recompile, edit the project, or touch tracked changes. Require an absolute local `.pdf` destination, validate the body signature before writing, and preserve the default exclusive-create behavior (`overwrite: false`). For a different root such as a response letter, call `compile(root_doc: ...)` first. Cached artifacts can expire; recompile in that case.
+
 ## License & contribution
 
 **AGPL-3.0-or-later.** We port from two AGPL projects (overleaf-workshop and overleaf/overleaf — see `LICENSE`). If you add code derived from a different license, check compatibility before merging.
@@ -50,6 +52,7 @@ Cookie capture is via a dedicated headless-ish Chrome profile, driven over the C
 - `compile-fix.mjs <project> [doc]` — compile → error log → fix → recompile loop
 - `accept-reject.mjs <project>` — list_tracked_changes → accept 1 → reject 1
 - `v1_1-followups.mjs <project>` — verifies root-doc-default + inline error_count
+- `download-pdf.mjs <project> <absolute-output.pdf> [root_doc]` — compile/download flow, PDF bytes, preconditions, and default no-overwrite behavior (use a new destination)
 
 ## Things not to do without asking
 
