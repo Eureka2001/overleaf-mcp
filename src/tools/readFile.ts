@@ -3,11 +3,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { joinDoc } from "../api/socket.js";
 import { olGet, expectOk } from "../api/http.js";
-import { findByPath, getActiveProject } from "../session/activeProject.js";
+import { findByPath, resolveActiveProject } from "../session/activeProject.js";
 import { updateDoc } from "../session/docCache.js";
 import { logger } from "../util/logger.js";
 
 const Schema = z.object({
+  project_id: z.string().min(8).optional().describe(
+    "Overleaf project id from list_projects or open_project. Pass this on every call when MCP sessions may change; opens the requested project if it is not already active.",
+  ),
   path: z
     .string()
     .min(1)
@@ -49,16 +52,22 @@ export function registerReadFile(server: McpServer): void {
     {
       title: "Read a file from the open Overleaf project",
       description:
-        "Reads the contents of a file by project-relative path. " +
+        "Reads the contents of a file by project-relative path. Pass project_id to read without a prior open_project in this session. " +
         "For text docs (.tex, .bib, .md, etc.) the full text appears in both the `content` array and `structuredContent.text`; metadata (version, line/byte counts, ranges, tracked-change/comment counts) is in `structuredContent`. " +
         "For binary files (images, PDFs) base64 is in `content` and `structuredContent.base64`, with MIME type alongside.",
       inputSchema: Schema.shape,
       annotations: { readOnlyHint: true },
     },
     async (args) => {
-      const ap = getActiveProject();
+      let ap;
+      try {
+        ap = await resolveActiveProject(args.project_id);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Failed to open requested project: ${message}` }], isError: true };
+      }
       if (!ap) {
-        return { content: [{ type: "text", text: "No project is open. Call open_project first." }], isError: true };
+        return { content: [{ type: "text", text: "No project is open in this session. Pass project_id from list_projects or open_project, or call open_project in the same session." }], isError: true };
       }
       const resolvedPath = args.path ?? ap.rootDocPath;
       if (!resolvedPath) {

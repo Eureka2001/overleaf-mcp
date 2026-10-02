@@ -25,6 +25,16 @@ export function getActiveProject(): ActiveProject | null {
   return active;
 }
 
+/** Resolve an explicit project without relying on state from an earlier MCP session. */
+export async function resolveActiveProject(
+  projectId?: string,
+  session: Pick<typeof import("./activeProject.js"), "getActiveProject" | "open"> = { getActiveProject, open },
+): Promise<ActiveProject | null> {
+  const current = session.getActiveProject();
+  if (!projectId || current?.projectId === projectId) return current;
+  return session.open(projectId);
+}
+
 export async function open(projectId: string): Promise<ActiveProject> {
   const { joinedProject } = await ensureSocketForProject(projectId);
   if (!joinedProject) {
