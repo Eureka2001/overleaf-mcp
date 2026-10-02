@@ -378,6 +378,23 @@ export function getActiveSocket(): OverleafSocket | null {
   return active;
 }
 
+// SaaS sends structure in joinProjectResponse when a socket connects, but no
+// longer acknowledges a repeated joinProject on that socket. A short-lived
+// second connection fetches fresh structure without disturbing joined docs or
+// clearing the edit baselines on the persistent connection.
+export async function fetchProjectSnapshot(projectId: string): Promise<ProjectEntity> {
+  return withAuthRetry(async () => {
+    const snapshot = new OverleafSocket(projectId, await getIdentity());
+    try {
+      await snapshot.connect();
+      if (!snapshot.joinedProject) throw new OverleafApiError(0, "", "joinProject did not return a project entity");
+      return snapshot.joinedProject;
+    } finally {
+      snapshot.disconnect();
+    }
+  });
+}
+
 // Snapshot the active project, run an emit, and if it fails because the
 // socket got torn down (auth-shaped error or "socket closed"), evict the
 // cookie if needed, re-establish the socket on the same project, and retry

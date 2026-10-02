@@ -1,4 +1,4 @@
-import { ensureSocketForProject, disconnectActive } from "../api/socket.js";
+import { ensureSocketForProject, disconnectActive, fetchProjectSnapshot, getActiveSocket } from "../api/socket.js";
 import { flattenTree, isTrackChangesOnForUser, type FlatEntity, type ProjectEntity } from "../api/projectTypes.js";
 import type { CompileResponse } from "../api/compileTypes.js";
 import { getIdentity } from "./identity.js";
@@ -23,6 +23,26 @@ export function setLastCompile(result: CompileResponse): void {
 
 export function getActiveProject(): ActiveProject | null {
   return active;
+}
+
+// Use a separate short-lived socket for fresh structure. Keep the persistent
+// socket's joined docs, read_file's pinned baselines and lastCompile intact.
+export async function refreshProjectTree(ap: ActiveProject): Promise<void> {
+  if (active !== ap) throw new Error("The active project changed. Open the intended project and try again.");
+  const project = await fetchProjectSnapshot(ap.projectId);
+  if (!project || project._id !== ap.projectId || !Array.isArray(project.rootFolder)) {
+    throw new Error("Overleaf returned an invalid project tree; reopen the project and try again.");
+  }
+  if (active !== ap) throw new Error("The active project changed while refreshing its file tree.");
+  const socket = getActiveSocket();
+  if (socket?.projectId === ap.projectId) socket.joinedProject = project;
+  ap.project = project;
+  ap.name = project.name ?? ap.name;
+  ap.entities = project.rootFolder[0] ? flattenTree(project.rootFolder[0]) : [];
+  ap.rootDocId = project.rootDoc_id;
+  ap.rootDocPath = ap.entities.find((entity) => entity.kind === "doc" && entity.id === ap.rootDocId)?.path;
+  const identity = await getIdentity();
+  ap.trackChangesOnForMe = isTrackChangesOnForUser(project, identity.userId);
 }
 
 export async function open(projectId: string): Promise<ActiveProject> {

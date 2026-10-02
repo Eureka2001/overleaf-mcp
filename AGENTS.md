@@ -6,7 +6,7 @@ Context for Agents (or any future contributor) working in this repo. Read top to
 
 `overleaf-mcp` is an MCP server for Overleaf. It speaks Overleaf's Socket.IO web API (the same channel the official editor uses), **not** the Git bridge. The headline feature: edits land as **tracked changes** in Overleaf's Review panel — every other Overleaf MCP punts to the Git bridge and silently overwrites, which makes them unusable for collaborative academic work.
 
-Tools (18): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, `edit_file`, `find_and_replace`, `compile`, `read_log`, `download_pdf`, `list_comments`, `read_comment_thread`, `reply_comment`, `resolve_comment`, `reopen_comment`, `list_tracked_changes`, `accept_changes`, `reject_changes`.
+Tools (20): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, `search_project`, `upload_file`, `edit_file`, `find_and_replace`, `compile`, `read_log`, `download_pdf`, `list_comments`, `read_comment_thread`, `reply_comment`, `resolve_comment`, `reopen_comment`, `list_tracked_changes`, `accept_changes`, `reject_changes`.
 
 ## Architecture you should know about before changing things
 
@@ -25,6 +25,10 @@ Tools (18): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, 
 - **`edit_file` defaults to `track: "on"`**. For a research workflow the agent should never silently overwrite — every edit goes through the review panel by default. Pass `track: "off"` to opt out. `find_and_replace` shares the same default and the same OT pathway.
 
 - **Stale-cache safety**: `read_file` pins `docCache` to the exact `(text, version)` it returned. `edit_file` diffs against that baseline, so a stale read causes a clean OT transform (or rejection) instead of silent overwrite. There's a manual test for this in `tests/manual/stale-version.mjs`.
+
+- **`search_project` reads live docs without pinning editing baselines.** Literal Unicode-aware matches preserve one-based UTF-16 offsets; cap returned results while counting all occurrences. Report partial read failures, and keep snippets bounded. `ensureSocketForProject` returns cached structure on an open socket, and current SaaS no longer acknowledges repeated `joinProject` on that socket (verified live). `refreshProjectTree` uses `fetchProjectSnapshot` on a short-lived second socket instead. Keep the persistent connection's joined documents, document baselines and last compile intact.
+
+- **`upload_file` is for assets, never editable text.** Use multipart `POST /Project/{id}/upload?folder_id=...` with `name` and `qqfile`; let fetch set the multipart boundary and send CSRF in the header. Overleaf's upload endpoint can replace a same-name entity: default no-overwrite must stage a unique asset and promote it with conflict-checked `POST /project/{id}/file/{id}/rename`. Check downloaded bytes, refresh structure, and clean up only that upload's own temporary asset on failure. Explicit binary overwrite may change the destination even if a subsequent verification fails; report uncertainty rather than deleting it.
 
 - **Concurrency safeguards (`src/ot/verify.ts`)**: each MCP process has its own in-process `docCache`, so parallel agents (or an open OL web editor) race on `applyOtUpdate` with stale `v`. The server's OT transform usually handles this fine, but it can collapse ops to a no-op while still acking success — the user-reported "find_and_replace returned replacements:1 but the doc is unchanged" bug. Two safeguards: (a) `verifyEdit` runs after every `applyOtUpdate` — re-`joinDocs` and reports `silentNoOp` (server text === pre-edit text → fail loud), `matchesExpected` (perfect, no race), or `hadConcurrentWritesAfter` (op landed but doc moved on → warn in response, don't fail). Cache is always synced to actual server state regardless. (b) `checkBaseline` is invoked when `strict_version: true` is passed — refuses to send if the cached `v` is behind the server. Both add one socket round-trip; for the workflow this MCP targets the cost is negligible compared to silently producing wrong edits.
 
@@ -53,6 +57,7 @@ Cookie capture is via a dedicated headless-ish Chrome profile, driven over the C
 - `accept-reject.mjs <project>` — list_tracked_changes → accept 1 → reject 1
 - `v1_1-followups.mjs <project>` — verifies root-doc-default + inline error_count
 - `download-pdf.mjs <project> <absolute-output.pdf> [root_doc]` — compile/download flow, PDF bytes, preconditions, and default no-overwrite behavior (use a new destination)
+- `upload-search.mjs <project> [existing-folder]` — live literal search, returned positions/versions, result caps, PNG upload, collision refusal, explicit overwrite and the server rename-conflict guard. Creates only randomly named unreferenced test assets, verifies bytes, then deletes only those assets by ID/path. Does not edit text or review data.
 
 ## Things not to do without asking
 

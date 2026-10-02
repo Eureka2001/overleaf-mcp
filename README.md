@@ -17,7 +17,7 @@ The [`overleaf-workshop`](https://github.com/overleaf-workshop/overleaf-workshop
 
 ## Status
 
-Working end-to-end against `overleaf.com` — 18 tools, tracked-changes edits and review-panel comments both verified. Published on npm as [`@netique/overleaf-mcp`](https://www.npmjs.com/package/@netique/overleaf-mcp).
+This fork provides 20 tools, including compiled PDF download, asset upload and project search. The upstream package is published on npm as [`@netique/overleaf-mcp`](https://www.npmjs.com/package/@netique/overleaf-mcp); use the source installation below to run this fork's additions.
 
 ## Tools
 
@@ -28,6 +28,8 @@ Working end-to-end against `overleaf.com` — 18 tools, tracked-changes edits an
 | `open_project` | Joins a project's real-time session and caches its file tree. Returns rich metadata: `root_doc_path`, `compiler`, `spell_check_language`, `public_access_level`, owner + members (with privileges), and whether track-changes is on for your user. |
 | `list_files` | Lists the file tree of the open project (cached, no network). Filter by `kind` and `path_contains`. |
 | `read_file` | Reads a doc (returns text + OT version + a summary of tracked changes / comments) or a binary file (base64 + MIME). `path` is optional — defaults to the project's root doc. |
+| `search_project` | Searches live editable documents for literal `query` text, including LaTeX commands. Supports `case_sensitive`, `path_contains`, `context_lines`, `max_results`. Returns paths, line/column positions, context and document versions; reports truncation and per-file failures. |
+| `upload_file` | Uploads a local image, vector graphic, PDF or font asset to an existing project folder. Takes absolute `local_path`, optional `project_path`, and `overwrite` (default false). Verifies remote bytes and refreshes the file tree. Editable text uploads are prohibited. |
 | `edit_file` | Replaces a doc's contents. Computes a minimal diff via `diff-match-patch`, submits it as an OT operation, and adds `meta.tc` so the edit lands as a pending suggestion in the Review panel by default. Pass `track: "off"` to write directly or `track: "auto"` to honor the project's track-changes setting. `path` is optional — defaults to the project's root doc. |
 | `find_and_replace` | Surgical edit: replace one occurrence (or all, with `replace_all: true`) of `old_string` with `new_string` without re-emitting the rest of the doc. Cheaper in tokens than `edit_file` for targeted changes and avoids whitespace drift from re-emitting surrounding text. By default `old_string` must be unique; ambiguous matches return a list of line:col locations so you can extend the match. Same `track` defaults and OT path as `edit_file`, so it lands as a pending suggestion in the Review panel. |
 | `list_tracked_changes` | Enumerates every pending tracked-change suggestion across the open project, with author name + email, doc path, op kind (insert/delete), position, op text, change_id. Filter by `author_email`, `author_id_endswith`, `path_contains`, `kind`, `text_contains`, `limit`. |
@@ -48,11 +50,21 @@ Things to ask Claude once `overleaf-mcp` is connected:
 
 - _"Accept every pending tracked change by John Doe that's only adjusting punctuation or whitespace."_ — uses `list_tracked_changes(author_email: "...")` → LLM filters by op text → `accept_changes(...)`.
 - _"List my recent Overleaf projects."_
+- _"Find every occurrence of this figure label across the project."_ → `search_project(query: "\\label{fig:example}")`. Search is literal and case-insensitive by default. Read the matching file before making a tracked edit.
+- _"Upload this new figure to img/error-analysis.pdf."_ → `upload_file(local_path: "D:\\figures\\error-analysis.pdf", project_path: "img/error-analysis.pdf")`. The parent folder must exist; replacing an existing binary asset requires explicit `overwrite: true`.
 - _"Open my thesis project and show me what comments my collaborators have left."_
 - _"Read intro.tex and fix the missing comma in the second paragraph."_  → with track-changes on, this lands as a tracked suggestion.
 - _"Compile the project and tell me what the LaTeX errors mean."_  → uses `compile` then `read_log` automatically.
 - _"Compile my paper and download the PDF to an absolute path on my computer."_ → `open_project` → `compile(root_doc: "main.tex")` → `download_pdf(output_path: "D:\\papers\\paper.pdf")`. For a response letter, compile with `root_doc: "response_letter.tex"` before downloading. The destination is on the computer running the MCP server; parent directories are created. Recompile if cached build output has expired or the source has changed. Check `built_cleanly` first if a PDF with LaTeX errors is unacceptable.
 - _"For each open comment thread, suggest a fix and reply with what you did."_  → end-to-end review workflow.
+
+### Asset upload and project search
+
+`upload_file` accepts nonempty assets up to 50 MiB: PNG, JPEG, GIF, WebP, BMP, TIFF, SVG, PDF, EPS, PS, TTF, OTF, WOFF and WOFF2. Paths are on the computer running the MCP server. `project_path` uses forward slashes and defaults to the local basename at project root; folders are not created automatically. The destination extension must represent the same asset type as the source. `.tex`, `.bib`, `.sty`, `.cls`, Markdown and other editable text are refused so uploads cannot bypass tracked editing.
+
+With the default `overwrite: false`, the tool uploads a uniquely named temporary asset, checks its downloaded bytes, then renames it using Overleaf's name-conflict check. A competing upload cannot silently replace the destination. On failure it attempts to remove only its own temporary asset; cleanup or overwrite uncertainty is reported explicitly. Successful results include `file_id`, `path`, `bytes`, `sha256`, `overwritten` and `verified`, and subsequent `list_files` / `read_file` calls see the refreshed tree. Binary assets have no text-review suggestions; changes to LaTeX references still go through tracked edits.
+
+`search_project` refreshes the tree and reads live editable documents; binary assets are skipped. Queries are literal, may span lines, and can contain LaTeX backslashes or regex punctuation. `case_sensitive` defaults to false, `path_contains` is a case-insensitive substring, `context_lines` is 0–3 (default 1), and `max_results` is 1–100 (default 50). Positions are one-based UTF-16 columns with an exclusive end position. Context is bounded to 300 characters per line and 12 lines per match, with truncation flags. `total_matches` counts all non-overlapping occurrences even when returned results are capped. `complete: false` plus `read_errors` and `isError: true` identify a partial search; the successful matches are retained. Versions are per-document snapshots, not a simultaneous snapshot of every file. Search leaves `read_file`'s editing baseline intact: call `read_file` before editing a match.
 
 ## Requirements
 
@@ -102,7 +114,7 @@ npx @netique/overleaf-mcp logout --confirm   # clear the saved cookie
 <summary>From source (for development)</summary>
 
 ```sh
-git clone https://github.com/netique/overleaf-mcp.git
+git clone https://github.com/Eureka2001/overleaf-mcp.git
 cd overleaf-mcp
 npm install
 npm run build

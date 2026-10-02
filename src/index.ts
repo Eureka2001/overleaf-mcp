@@ -12,6 +12,8 @@ import { registerEditFile } from "./tools/editFile.js";
 import { registerFindAndReplace } from "./tools/findAndReplace.js";
 import { registerCompile, registerReadLog } from "./tools/compile.js";
 import { registerDownloadPdf } from "./tools/downloadPdf.js";
+import { registerUploadFile } from "./tools/uploadFile.js";
+import { registerSearchProject } from "./tools/searchProject.js";
 import { registerComments } from "./tools/comments.js";
 import { registerTrackedChanges } from "./tools/trackedChanges.js";
 import { close as closeActiveProject } from "./session/activeProject.js";
@@ -33,7 +35,8 @@ const INSTRUCTIONS = [
   "Typical flow:",
   "  1. list_projects -> pick an id",
   "  2. open_project(id) -> joins the Socket.IO room, returns file tree + tc state",
-  "  3. read_file / edit_file by path (e.g. 'chapters/intro.tex')",
+  "  3. search_project to locate text; read_file before tracked edits by path",
+  "     upload_file(local_path, project_path) for figures/PDFs/fonts in existing folders",
   "  4. compile to verify edits build",
   "  5. download_pdf(output_path) to save the last compiled PDF locally",
   "",
@@ -72,6 +75,8 @@ async function main(): Promise<void> {
   registerOpenProject(server);
   registerListFiles(server);
   registerReadFile(server);
+  registerSearchProject(server);
+  registerUploadFile(server);
   registerEditFile(server);
   registerFindAndReplace(server);
   registerCompile(server);

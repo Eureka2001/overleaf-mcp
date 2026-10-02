@@ -73,6 +73,22 @@ export async function olDelete(path: string, extraHeaders: Record<string, string
   });
 }
 
+// Let fetch generate the multipart boundary. FormData/Blob can be replayed
+// after an authentication refresh without reading the local file again.
+export async function olPostMultipart(path: string, form: FormData): Promise<Response> {
+  return withAuthRetry(async () => {
+    const id = await getIdentity();
+    const res = await fetch(joinUrl(id.baseUrl, path), {
+      method: "POST",
+      redirect: "manual",
+      headers: { Cookie: id.cookie, Connection: "keep-alive", "X-Csrf-Token": id.csrf },
+      body: form,
+    });
+    throwIfAuthBad(res);
+    return res;
+  });
+}
+
 export async function expectOk(res: Response, hint?: string): Promise<Response> {
   if (res.ok) return res;
   // Defensive: primitives above already throw on auth-bad responses, but a
