@@ -75,11 +75,21 @@ export function registerCompile(server: McpServer): void {
         return { content: [{ type: "text", text: "No project is open. Call open_project first." }], isError: true };
       }
       try {
+        // overleaf.com now validates rootResourcePath as a required string and
+        // 400s on null ("expected string, received null") — always send a
+        // concrete path, never the old null-means-server-default form.
+        const rootResourcePath = args.root_doc ?? ap.rootDocPath;
+        if (!rootResourcePath) {
+          return {
+            content: [{ type: "text", text: "Project has no configured root doc. Pass `root_doc` (e.g. 'main.tex')." }],
+            isError: true,
+          };
+        }
         const body = {
           check: "silent",
           draft: args.draft,
           incrementalCompilesEnabled: true,
-          rootResourcePath: args.root_doc ?? null,
+          rootResourcePath,
           stopOnFirstError: args.stop_on_first_error,
         };
         const res = await olPostJson(`project/${ap.projectId}/compile?auto_compile=true`, body);

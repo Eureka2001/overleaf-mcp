@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-Context for Claude (or any future contributor) working in this repo. Read top to bottom — short.
+Context for Agents (or any future contributor) working in this repo. Read top to bottom — short.
 
 ## What this is
 
