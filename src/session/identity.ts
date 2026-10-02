@@ -14,7 +14,7 @@ export interface Identity {
 let cached: Identity | null = null;
 let pending: Promise<Identity> | null = null;
 
-function extractMeta(html: string, name: string): string | undefined {
+export function extractMeta(html: string, name: string): string | undefined {
   const re = new RegExp(`<meta\\s+name=["']${name}["']\\s+content=["']([^"']*)["']`);
   return html.match(re)?.[1];
 }

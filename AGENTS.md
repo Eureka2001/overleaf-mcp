@@ -59,6 +59,49 @@ Cookie capture is via a dedicated headless-ish Chrome profile, driven over the C
 - `download-pdf.mjs <project> <absolute-output.pdf> [root_doc]` — compile/download flow, PDF bytes, preconditions, and default no-overwrite behavior (use a new destination)
 - `upload-search.mjs <project> [existing-folder]` — live literal search, returned positions/versions, result caps, PNG upload, collision refusal, explicit overwrite and the server rename-conflict guard. Creates only randomly named unreferenced test assets, verifies bytes, then deletes only those assets by ID/path. Does not edit text or review data.
 
+## Diagnostics and protocol drift
+
+Build with `npm run build`, then `npm run diagnose` or `node dist/diagnose.js`. For machine-readable stdout use `node dist/diagnose.js --json` or `npm run --silent diagnose -- --json`. `--project <24-hex-id>` selects a listed, non-trashed project; otherwise the first active project is used. `--no-compile` avoids generating build artifacts/using compile quota. Check deadlines default to 10s, compilation to 60s (`--timeout-ms` / `--compile-timeout-ms`). Exit 0 means no failures, **not full protocol coverage**; 1 means failed checks, 2 usage/startup failure. No session means one actionable auth failure and downstream skips; no active project means skips, not failure.
+
+The diagnostic consumer is `src/diagnostics/run.ts`; contracts, aggregation/categories, redaction and renderers are separate modules. It reuses `fetchProjects`, explicit `HttpContext` on `olGet`/`olPostJson`, `requestCompile`, `OverleafSocket`, `parseJoinDocResponse`, `textToOps`, the pure `buildOtUpdate` builder (including `generateIdSeed`), and upload form/response helpers. An explicit HTTP identity disables browser recovery; the standalone diagnostic socket is not the MCP process's active socket and emits only `joinDoc` or the legacy initial `joinProject` fallback. Never route diagnostics through auth retry, cached document baselines, `submitAndVerify`, comment mutations or change accept/reject.
+
+Safety/coverage contracts:
+
+- No text/OT writes (including no-op updates), comment changes, tracked-change acceptance/rejection or asset upload/deletion. There is no `--write` / `--full` mode. Default compile updates build outputs; use `--no-compile` for reads only.
+- Project metadata and file tree are received from realtime `joinProjectResponse` / initial `joinProject`, **not a separate HTTP metadata JSON API**. Do not invent such an endpoint or re-emit `joinProject` on an already joined SaaS socket.
+- `PASS` means the specific check ran and verified its stated evidence. `FAIL` means unavailable or incompatible. `WARN` means a nonfatal problem. `SKIP` means not executed. `PARTIAL` means limited evidence; empty review data, local write construction, supplied `OL_CSRF`, and OPTIONS capability evidence cannot prove the unobserved protocol. Reports containing skips/partials never aggregate to `passed`.
+- OT safe checks confirm a live integer version, synthetic diff round trip and a tc-only 18-hex seed. They **cannot verify applyOtUpdate acceptance, write ACKs, post-write versions or server tracking**. `review.ranges` with actual entries verifies read schema only. `review.tracking` stays PARTIAL even with recognized per-user state. OPTIONS/Allow cannot confirm an upload actually works or that its required fields/response remain valid.
+- Compile HTTP/response-schema success is separate from LaTeX health. Parse `output.log` using existing `summarizeErrors`; LaTeX errors are WARN, not COMPILE_API drift. Missing/empty log is PARTIAL, not a clean-build claim. Response missing status or missing outputFiles on success is a COMPILE_API failure.
+- Every network/body read has a deadline and fetch cancellation; socket connect bounds handshake, upgrade and project join together. Closing/disconnecting rejects pending ACKs and clears timers; event timeout differs from malformed envelope/ACK, transport loss and explicit server rejection. Only explicit auth evidence (401/403/login/invalid session) permits AUTHENTICATION classification. Unknown type-7 errors and HTTP 5xx must not imply expired credentials.
+- All reports go through `DiagnosticRedactor` before returning or formatting; actual cookie components/CSRF are registered, unknown credential fields/headers and URL queries are masked. Diagnostic socket logging is quiet; strict stored-cookie reads avoid raw parse-error logging. Keep document/comment/range text out of reports. Project/doc IDs are intentionally retained. Never save raw HAR/headers/handshake SIDs in fixtures, commits or issue reports.
+
+Source-of-truth hierarchy when behavior changes:
+
+1. Live behavior of the **configured deployment** (overleaf.com for SaaS), with an authenticated browser request/ACK and fresh server state after the operation.
+2. The Web Editor client actually deployed there: network traffic, bundled code and its current op construction. Pin observation date/deployment/version where available.
+3. Current [Overleaf OSS source](https://github.com/overleaf/overleaf), matching the deployment/version when possible. OSS main can lag SaaS; use it to explain observations, never to overrule a reproducible live rejection.
+4. This repository's historical assumptions, AGENTS notes and old captures. Existing tests encode a hypothesis; update them only after obtaining newer evidence.
+
+Use the report's stable `id`, `category`, `kind`, `expected`, `observed`, `relevantFiles` and `recommendation` as the starting point:
+
+| Category | Inspect first / revalidation |
+|---|---|
+| LOCAL_ENV | Node >=20, built entrypoint/imports, config/session path/read permissions, OL_BASE_URL. Diagnostics does not rebuild or certify build freshness. |
+| AUTHENTICATION | GET /project redirect/status/login markup; cookie capture and identity discovery (`src/auth`, `src/session/identity.ts`). Refresh via explicit login. For 403 also check CSRF and project permissions before assuming session expiry. |
+| NETWORK / HTTP_ENDPOINT | DNS/TLS/proxy/rate limits/status/redirects, then the exact live HTTP method/path and OSS router/controller. A reachable generic OPTIONS handler is not proof of an upload route. |
+| HTTP_SCHEMA | Dashboard POST /api/project, fallback GET /user/projects only for 404/405; identity/CSRF meta tags. Missing `projects` is drift, not an empty account. Compare web Projects/Authentication controllers. |
+| SOCKET_HANDSHAKE / SOCKET_TRANSPORT | `/socket.io/1/?projectId=...`, `sid:heartbeat:closeTimeout:transports`, WebSocket upgrade cookies (GCLB affinity). Check load balancer and `services/real-time/app/js/Router.js` before changing 0.9 framing. |
+| SOCKET_PROTOCOL / SOCKET_EVENT | Current Web Editor WS traffic; distinguish unparseable envelope / unexpected ACK schema / event timeout / rejection. Inspect realtime `Router.js`, `WebsocketController.js`, joinProjectResponse/legacy ACK and joinDoc packed UTF-8/version tuple. Missing version must not default to 0. |
+| OT_PROTOCOL / VERSION_CONFLICT | Deployed `share-js-doc.ts` and `applyOtUpdate(docId, update)`; realtime validator, document-updater and `src/ot/verify.ts`. Check strict baseline and concurrent writes, then re-join and compare text/version; ACK alone can mask a transformed no-op. |
+| TRACK_CHANGES | [realtime validator](https://github.com/overleaf/overleaf/blob/main/services/real-time/app/js/Router.js), [share-js-doc.ts](https://github.com/overleaf/overleaf/blob/main/services/web/frontend/js/features/ide-react/editor/share-js-doc.ts), [ranges-tracker](https://github.com/overleaf/overleaf/blob/main/libraries/ranges-tracker/index.cjs), document-updater RangesManager, live meta.tc/GET ranges and per-user forced tracking. Preserve the existing tc-only rule and tracked-delete/reject semantics above. |
+| COMMENTS | Live GET /project/:id/threads and /ranges, comment anchors and message content/timestamp shapes; locate the matching web routes/controllers and `src/tools/comments.ts`. Empty map confirms endpoint shape only. |
+| COMPILE_API | Live POST /project/:id/compile request/rootResourcePath and response status/outputFiles; web Compile router/controller. Verify CLSI worker/group routing and log fetch separately from project LaTeX errors. |
+| UPLOAD_API | Capitalized `/Project/:id/upload?folder_id=...`, multipart `name`/`qqfile`, CSRF header, response success/entity_type/entity_id; locate the matching web upload routes/controllers and `src/tools/uploadFile.ts`. Retain no-overwrite staging/conflict-checked rename/own-asset cleanup. |
+
+Maintenance loop: save the **redacted JSON** with deployment/date → reproduce the failing boundary in the Web Editor → compare the deployed client and matching OSS source → update the shared client contract, not a diagnostics-only workaround → add a minimal sanitized drift fixture → run `npm test`, `npm run typecheck`, `npm run build` and safe diagnostics again. Tests in `tests/unit/diagnostics.spec.ts` exercise production transports against a local simulated service, including safe-mode request allowlists, auth, timeouts, ACK/schema drift and redaction.
+
+If extending with mutation probes later, require a dedicated test project and a separately owned temporary document/asset/thread lifecycle first. Never borrow an existing user doc/comment/change for a probe. Record ownership before writes, handle lost ACKs and concurrent writers, verify only the probe's own state, clean up in finally with a deadline, and report cleanup failure plus exact owned ID/path. Existing manual tracked/accept-reject/compile-fix scripts can modify user data; do not run them as default diagnostics.
+
 ## Things not to do without asking
 
 - Don't change `track: "on"` default — collaborators expect to review every agent edit.

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { asJson, olGet, olPostJson, expectOk } from "../api/http.js";
+import { asJson, olGet, olPostJson, expectOk, type HttpContext } from "../api/http.js";
 import { getActiveProject, setLastCompile } from "../session/activeProject.js";
 import type { CompileResponse, OutputFile } from "../api/compileTypes.js";
 import { logger } from "../util/logger.js";
@@ -56,6 +56,15 @@ async function fetchOutputLog(last: CompileResponse): Promise<string | undefined
   return await res.text();
 }
 
+export function buildCompileRequest(rootResourcePath: string, draft = false, stopOnFirstError = false): Record<string, unknown> {
+  return { check: "silent", draft, incrementalCompilesEnabled: true, rootResourcePath, stopOnFirstError };
+}
+
+export async function requestCompile(projectId: string, rootResourcePath: string, draft = false, stopOnFirstError = false, context?: HttpContext): Promise<CompileResponse> {
+  return asJson<CompileResponse>(await olPostJson(`project/${projectId}/compile?auto_compile=true`,
+    buildCompileRequest(rootResourcePath, draft, stopOnFirstError), {}, context), "POST project compile");
+}
+
 export function registerCompile(server: McpServer): void {
   server.registerTool(
     "compile",
@@ -85,15 +94,7 @@ export function registerCompile(server: McpServer): void {
             isError: true,
           };
         }
-        const body = {
-          check: "silent",
-          draft: args.draft,
-          incrementalCompilesEnabled: true,
-          rootResourcePath,
-          stopOnFirstError: args.stop_on_first_error,
-        };
-        const res = await olPostJson(`project/${ap.projectId}/compile?auto_compile=true`, body);
-        const result = await asJson<CompileResponse>(res, `POST project/${ap.projectId}/compile`);
+        const result = await requestCompile(ap.projectId, rootResourcePath, args.draft, args.stop_on_first_error);
         setLastCompile(result);
         const pdf = result.outputFiles?.find((f) => f.path === "output.pdf");
         const logFile = result.outputFiles?.find((f) => f.path === "output.log");

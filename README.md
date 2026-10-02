@@ -164,6 +164,26 @@ Any Chromium-family browser works — Chrome, Brave, Edge, Arc, Chromium. If `fi
 
 ## Troubleshooting
 
+### Protocol diagnostics
+
+From a source installation, build once and run:
+
+```sh
+npm run build
+npm run diagnose
+npm run diagnose -- --json
+# For clean JSON stdout without npm's own banner:
+npm run --silent diagnose -- --json
+# Equivalent built entrypoint; select a project or avoid compilation:
+node dist/diagnose.js --project <project-id> --no-compile
+```
+
+Diagnostics checks the local environment, saved session/CSRF discovery, project listing, Socket.IO handshake and project/document reads, OT construction, review ranges/comments, compilation/logs and upload capability evidence. It uses the first active project unless `--project` is given; no projects/documents means relevant checks are skipped. It never launches login, refreshes/deletes stored credentials, edits text, changes comments/suggestions or uploads assets. **Default compilation updates build outputs and may consume compile quota**; `--no-compile` avoids this too. `--full` / `--write` are not implemented.
+
+`PASS` confirms an executed check; `FAIL` means unavailable/incompatible; `WARN` reports a nonfatal issue (including the project's LaTeX errors); `SKIP` was not executed; `PARTIAL` verifies only part of a contract. OT write ACK/version semantics, `meta.tc` behavior and actual uploads remain explicitly unverified in safe mode. Empty review data cannot confirm populated schemas, and OPTIONS alone cannot prove multipart upload works.
+
+JSON includes `schemaVersion`, `overall`, counts, stable check IDs, categories, expected/observed evidence, implementation paths and investigation steps. Authentication material is redacted; project/document IDs remain useful for debugging, while document/comment text is omitted. Exit codes: **0** no failures (coverage may be partial), **1** failed checks, **2** usage/startup error. Defaults: 10 seconds per check (including the whole socket connection), 60 seconds for compilation; override with `--timeout-ms` / `--compile-timeout-ms`. See `AGENTS.md` for protocol drift investigation.
+
 **`OverleafAuthError: Session cookie rejected (redirected to /login)`** — your stored cookie has expired. overleaf-mcp relaunches Chrome automatically on the next tool call to refresh; you should only see this surface as a user-facing error if Chrome itself failed to start.
 
 **`No Chromium-family browser found`** — install Chrome (or Brave/Edge/Arc/Chromium), or set `OL_BROWSER` to a binary path.

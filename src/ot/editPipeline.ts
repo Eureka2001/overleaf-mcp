@@ -119,12 +119,17 @@ export interface SubmitResult {
 // the server's actual state, and compose the shared response-text notes.
 // Tool-specific work (per-tool structuredContent shape, per-tool prose) is
 // the caller's responsibility.
-export async function submitAndVerify(opts: SubmitOpts): Promise<SubmitResult> {
-  const { shouldTrack, serverWillTrack, trackOverridden } = resolveTracking(opts.track, opts.ap.trackChangesOnForMe);
-  const update: OtUpdate = { doc: opts.entity.id, op: opts.ops, v: opts.cached.version };
+export function buildOtUpdate(docId: string, ops: ShareJsOp[], version: number, shouldTrack: boolean): OtUpdate {
+  const update: OtUpdate = { doc: docId, op: ops, v: version };
   // `tc` is the only meta key the server accepts from a client; when we're not
   // tracking, send no `meta` at all (same as the web client with review off).
   if (shouldTrack) update.meta = { tc: generateIdSeed() };
+  return update;
+}
+
+export async function submitAndVerify(opts: SubmitOpts): Promise<SubmitResult> {
+  const { shouldTrack, serverWillTrack, trackOverridden } = resolveTracking(opts.track, opts.ap.trackChangesOnForMe);
+  const update = buildOtUpdate(opts.entity.id, opts.ops, opts.cached.version, shouldTrack);
   await applyOtUpdate(opts.entity.id, update);
   const optimisticVersion = opts.cached.version + 1;
   const trackingNote = serverWillTrack

@@ -37,13 +37,14 @@ function hostKey(baseUrl: string): string {
   return new URL(baseUrl).host;
 }
 
-async function readStore(): Promise<StoreShape> {
+async function readStore(strict = false): Promise<StoreShape> {
   try {
     const raw = await fs.readFile(cookieFilePath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<StoreShape>;
     return { hosts: parsed.hosts ?? {} };
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { hosts: {} };
+    if (strict) throw new Error(`Stored session unreadable (${(err as NodeJS.ErrnoException)?.code ?? "invalid JSON"})`);
     logger.warn(`cookie store unreadable, treating as empty: ${(err as Error).message}`);
     return { hosts: {} };
   }
@@ -59,9 +60,13 @@ async function writeStore(store: StoreShape): Promise<void> {
   await fs.chmod(file, 0o600).catch(() => undefined);
 }
 
-export async function loadStored(baseUrl: string): Promise<StoredCookie | null> {
-  const store = await readStore();
-  return store.hosts[hostKey(baseUrl)] ?? null;
+export async function loadStored(baseUrl: string, strict = false): Promise<StoredCookie | null> {
+  const store = await readStore(strict);
+  const stored = store.hosts?.[hostKey(baseUrl)] ?? null;
+  if (strict && stored && (typeof stored.cookie !== "string" || !Number.isFinite(stored.savedAt))) {
+    throw new Error("Stored session has an invalid cookie/savedAt shape");
+  }
+  return stored;
 }
 
 export async function saveStored(baseUrl: string, cookie: string): Promise<void> {

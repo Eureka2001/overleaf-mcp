@@ -1,34 +1,40 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { asJson, olGet, olPostJson } from "../api/http.js";
+import { asJson, olGet, olPostJson, type HttpContext } from "../api/http.js";
+import { describeShape, OverleafProtocolError } from "../api/errors.js";
 import { normalizeProject, type ProjectSummary, type RawProject } from "../api/types.js";
 import { logger } from "../util/logger.js";
 
-interface ProjectsResponse {
-  projects?: RawProject[];
-}
-
-async function fetchProjects(): Promise<ProjectSummary[]> {
+export async function fetchProjects(context?: HttpContext): Promise<ProjectSummary[]> {
   // POST /api/project is the dashboard XHR — returns lastUpdated, owner, etc.
   // GET /user/projects exists on older / self-hosted Overleaf but returns a
   // minimal payload (id + name + accessLevel only). Prefer the rich endpoint.
   let raw: RawProject[] | undefined;
-  const r1 = await olPostJson("api/project", {});
+  const r1 = await olPostJson("api/project", {}, {}, context);
   if (r1.ok) {
-    raw = ((await r1.json()) as ProjectsResponse).projects;
+    raw = parseProjectsResponse(await r1.json());
   } else if (r1.status === 404 || r1.status === 405) {
-    const r2 = await olGet("user/projects");
-    raw = (await asJson<ProjectsResponse>(r2, "GET /user/projects")).projects;
+    const r2 = await olGet("user/projects", {}, context);
+    raw = parseProjectsResponse(await asJson(r2, "GET /user/projects"));
   } else {
     await asJson(r1, "POST /api/project");
   }
-  if (!raw) return [];
+  if (!raw) throw new OverleafProtocolError("http.projects", "schema", "{ projects: Project[] }", "missing projects");
   return raw.map(normalizeProject).sort((a, b) => {
     const ta = a.lastUpdated ? Date.parse(a.lastUpdated) : 0;
     const tb = b.lastUpdated ? Date.parse(b.lastUpdated) : 0;
     return tb - ta;
   });
+}
+
+export function parseProjectsResponse(value: unknown): RawProject[] {
+  const parsed = z.object({ projects: z.array(z.object({
+    id: z.string().min(1).optional(), _id: z.string().min(1).optional(), name: z.string().optional(),
+    archived: z.boolean().optional(), trashed: z.boolean().optional(),
+  }).passthrough().refine((p) => Boolean(p.id || p._id))) }).safeParse(value);
+  if (!parsed.success) throw new OverleafProtocolError("http.projects", "schema", "{ projects: [{ id or _id: string, name?: string }] }", describeShape(value));
+  return parsed.data.projects as RawProject[];
 }
 
 const FilterSchema = z.object({

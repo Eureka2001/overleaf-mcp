@@ -17,7 +17,7 @@
 
 import WebSocket from "ws";
 
-import { OverleafApiError, OverleafAuthError } from "./errors.js";
+import { describeShape, OverleafApiError, OverleafAuthError, OverleafProtocolError } from "./errors.js";
 import { getIdentity, type Identity } from "../session/identity.js";
 import { withAuthRetry } from "../session/recovery.js";
 import type { ProjectEntity } from "./projectTypes.js";
@@ -35,7 +35,7 @@ export interface OtUpdate {
   meta?: { tc: string };
 }
 
-interface JoinDocResult {
+export interface JoinDocResult {
   docLines: string[];
   version: number;
   updates: unknown[];
@@ -45,6 +45,7 @@ interface JoinDocResult {
 type EventListener = (args: unknown[]) => void;
 
 interface PendingAck {
+  event: string;
   resolve: (data: unknown[]) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
@@ -76,7 +77,7 @@ function mergeSetCookies(existing: string, responseHeaders: Headers): string {
   return `${existing}; ${adds.join("; ")}`;
 }
 
-class OverleafSocket {
+export class OverleafSocket {
   private ws: WebSocket | null = null;
   private nextAckId = 1;
   private pending = new Map<number, PendingAck>();
@@ -84,120 +85,137 @@ class OverleafSocket {
   private heartbeatInterval: number = 60_000;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private closed = false;
+  private connectionFailure: ((error: Error) => void) | null = null;
+  private readonly log: typeof logger;
   joinedProject: ProjectEntity | null = null;
   publicId: string | null = null;
   permissionsLevel: string | null = null;
   protocolVersion: number | null = null;
 
-  constructor(public readonly projectId: string, public readonly identity: Identity) {}
+  constructor(public readonly projectId: string, public readonly identity: Identity, quiet = false) {
+    this.log = quiet ? { debug() {}, info() {}, warn() {}, error() {} } : logger;
+  }
 
-  async connect(timeoutMs = 15_000): Promise<void> {
-    const base = this.identity.baseUrl;
-    const t = Date.now();
-    const hsUrl = `${base}/socket.io/1/?projectId=${encodeURIComponent(this.projectId)}&t=${t}`;
-    const hsRes = await fetch(hsUrl, {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        Cookie: this.identity.cookie,
-        Origin: new URL(base).origin,
-        Connection: "keep-alive",
-      },
-    });
-    if (hsRes.status >= 300 && hsRes.status < 400) {
-      const loc = hsRes.headers.get("location") ?? "";
-      if (/\/login(\?|$|\/)/i.test(loc)) {
-        throw new OverleafAuthError(`Socket.IO handshake redirected to ${loc} — session expired`);
+  async connect(timeoutMs = 15_000, options: {
+    signal?: AbortSignal;
+    onStage?: (stage: "handshake" | "transport") => void;
+  } = {}): Promise<void> {
+    let stage = "socket.handshake";
+    const controller = new AbortController();
+    const timedOut = () => new OverleafProtocolError(stage, "timeout", "completion before deadline", "timeout after " + timeoutMs + "ms");
+    const deadline = setTimeout(() => controller.abort(timedOut()), timeoutMs);
+    const abort = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    let fallback: NodeJS.Timeout | undefined;
+    let joined: EventListener | undefined;
+    let cancelled: (() => void) | undefined;
+    try {
+      const base = this.identity.baseUrl;
+      const hsRes = await fetch(base + "/socket.io/1/?projectId=" + encodeURIComponent(this.projectId) + "&t=" + Date.now(), {
+        method: "GET", redirect: "manual", signal: controller.signal,
+        headers: { Cookie: this.identity.cookie, Origin: new URL(base).origin, Connection: "keep-alive" },
+      });
+      const location = hsRes.headers.get("location") ?? "";
+      if (hsRes.status === 401 || hsRes.status === 403 || (hsRes.status >= 300 && hsRes.status < 400 && /\/login(\?|$|\/)/i.test(location))) {
+        throw new OverleafAuthError("Socket.IO handshake rejected session: HTTP " + hsRes.status);
       }
-      throw new OverleafAuthError(`Socket.IO handshake returned ${hsRes.status} -> ${loc}`);
-    }
-    if (hsRes.status !== 200) {
-      const body = await hsRes.text().catch(() => "");
-      throw new OverleafAuthError(`Socket.IO handshake returned ${hsRes.status}: ${body.slice(0, 200)}`);
-    }
-    const hsBody = await hsRes.text();
-    const [sid, hbStr, , transports] = hsBody.split(":");
-    if (!sid || !transports?.includes("websocket")) {
-      throw new OverleafApiError(0, hsBody, "handshake response did not include a sid or websocket transport");
-    }
-    this.heartbeatInterval = Math.max(15_000, (Number(hbStr) || 60) * 1000 - 5_000);
-    // The Overleaf SaaS sits behind a GCP load balancer that pins requests to
-    // a backend via a `GCLB` cookie set on the handshake response. The WS
-    // upgrade MUST land on the same backend (it carries the in-memory sid),
-    // so we extract any Set-Cookie from the handshake and merge it into the
-    // Cookie header we send on the upgrade. Without this the upgrade routes
-    // randomly and intermittently returns 502.
-    const upgradeCookie = mergeSetCookies(this.identity.cookie, hsRes.headers);
-    const wsUrl = `${base.replace(/^http/, "ws")}/socket.io/1/websocket/${sid}`;
-    const ws = new WebSocket(wsUrl, {
-      headers: { Cookie: upgradeCookie, Origin: new URL(base).origin },
-      handshakeTimeout: timeoutMs,
-    });
-    this.ws = ws;
-
-    await new Promise<void>((resolve, reject) => {
-      const settleTimer = setTimeout(
-        () => reject(new OverleafApiError(0, "", `WebSocket upgrade did not complete within ${timeoutMs}ms`)),
-        timeoutMs,
-      );
-      ws.once("open", () => {
-        clearTimeout(settleTimer);
-        logger.info(`socket.io connected (sid=${sid})`);
-        this.startHeartbeats();
-        // joinProjectResponse arrives auto-magically on v2-style URL.
-        const once = (args: unknown[]) => {
-          const payload = args[0] as
-            | {
-                publicId?: string;
-                project?: ProjectEntity;
-                permissionsLevel?: string;
-                protocolVersion?: number;
-              }
-            | undefined;
-          if (payload) {
-            this.joinedProject = payload.project ?? null;
-            this.publicId = payload.publicId ?? null;
-            this.permissionsLevel = payload.permissionsLevel ?? null;
-            this.protocolVersion = payload.protocolVersion ?? null;
-          }
-          resolve();
+      if (hsRes.status !== 200) throw new OverleafApiError(hsRes.status, await hsRes.text(), "Socket.IO handshake");
+      const hsBody = await hsRes.text();
+      const [sid, heartbeat, closeTimeout, transports, ...extra] = hsBody.trim().split(":");
+      if (!sid || !/^[\w-]+$/.test(sid) || !/^\d+$/.test(heartbeat ?? "") || !/^\d+$/.test(closeTimeout ?? "") || !transports?.split(",").includes("websocket") || extra.length) {
+        throw new OverleafProtocolError(stage, "protocol", "sid:heartbeat:closeTimeout:transports including websocket (Socket.IO 0.9)", "unrecognized handshake envelope (" + hsBody.length + " characters)");
+      }
+      this.heartbeatInterval = Math.max(15_000, (Number(heartbeat) || 60) * 1000 - 5_000);
+      options.onStage?.("handshake");
+      stage = "socket.transport";
+      // SaaS requires the handshake's GCLB cookie to pin the upgrade backend.
+      const upgradeCookie = mergeSetCookies(this.identity.cookie, hsRes.headers);
+      const ws = new WebSocket(base.replace(/^http/, "ws") + "/socket.io/1/websocket/" + sid, {
+        headers: { Cookie: upgradeCookie, Origin: new URL(base).origin }, handshakeTimeout: timeoutMs,
+      });
+      this.ws = ws;
+      await new Promise<void>((resolve, reject) => {
+        this.connectionFailure = reject;
+        cancelled = () => reject(controller.signal.reason ?? timedOut());
+        controller.signal.addEventListener("abort", cancelled, { once: true });
+        if (controller.signal.aborted) { cancelled(); return; }
+        const accept = (project: unknown, permission?: unknown, protocol?: unknown) => {
+          try {
+            this.joinedProject = parseJoinedProject(project, this.projectId);
+            if (permission != null && typeof permission !== "string") throw new OverleafProtocolError("socket.joinProject", "schema", "permissionsLevel: string", describeShape(permission));
+            if (protocol != null && !Number.isSafeInteger(protocol)) throw new OverleafProtocolError("socket.joinProject", "schema", "protocolVersion: integer", describeShape(protocol));
+            this.permissionsLevel = typeof permission === "string" ? permission : null;
+            this.protocolVersion = typeof protocol === "number" ? protocol : null;
+            resolve();
+          } catch (error) { reject(error); }
         };
-        this.once("joinProjectResponse", once);
-        // Some servers (older / v1 path) won't emit joinProjectResponse on the
-        // initial WS connect; fall back to emitting joinProject explicitly.
-        setTimeout(() => {
-          if (!this.joinedProject) {
-            logger.info("no joinProjectResponse received, falling back to explicit joinProject emit");
-            this.emit<[ProjectEntity, string, number] | ProjectEntity>("joinProject", [{ project_id: this.projectId }])
+        joined = (args) => {
+          const payload = args[0];
+          if (!payload || typeof payload !== "object" || Array.isArray(payload) || !("project" in payload)) {
+            reject(new OverleafProtocolError("socket.joinProject", "schema", "joinProjectResponse({ project, permissionsLevel?, protocolVersion? })", describeShape(payload)));
+            return;
+          }
+          const p = payload as Record<string, unknown>;
+          this.publicId = typeof p.publicId === "string" ? p.publicId : null;
+          accept(p.project, p.permissionsLevel, p.protocolVersion);
+        };
+        this.once("joinProjectResponse", joined);
+        ws.once("open", () => {
+          this.log.info("socket.io transport connected");
+          this.startHeartbeats();
+          options.onStage?.("transport");
+          stage = "socket.joinProject";
+          fallback = setTimeout(() => {
+            if (this.closed || this.joinedProject || controller.signal.aborted) return;
+            // The connection deadline owns cancellation, including this ACK.
+            this.emit("joinProject", [{ project_id: this.projectId }], timeoutMs)
               .then((ret) => {
                 const tuple = Array.isArray(ret) ? ret : [ret];
-                const [project, perm, proto] = tuple as [ProjectEntity, string, number];
-                this.joinedProject = project ?? null;
-                this.permissionsLevel = perm ?? null;
-                this.protocolVersion = typeof proto === "number" ? proto : null;
-                resolve();
-              })
-              .catch(reject);
-          }
-        }, 3_000);
+                accept(tuple[0], tuple[1], tuple[2]);
+              }).catch(reject);
+          }, Math.min(3_000, timeoutMs / 2));
+        });
+        ws.on("error", (error) => {
+          const failure = new OverleafProtocolError(stage, "transport", "open WebSocket transport", error.message);
+          reject(failure);
+          this.rejectPending(failure);
+        });
+        ws.on("message", (data) => this.handleFrame(data.toString("utf8")));
+        ws.once("close", (code, reason) => {
+          this.stopHeartbeats();
+          this.closed = true;
+          const failure = new OverleafProtocolError(stage, "transport", "open socket", "socket closed (" + code + ") " + reason.toString());
+          reject(failure);
+          this.rejectPending(failure);
+        });
       });
-      ws.once("error", (err) => {
-        clearTimeout(settleTimer);
-        reject(err instanceof Error ? err : new Error(String(err)));
-      });
-      ws.on("message", (data) => this.handleFrame(data.toString("utf8")));
-      ws.once("close", (code, reason) => {
-        this.stopHeartbeats();
-        this.closed = true;
-        const r = reason?.toString?.() ?? "";
-        logger.warn(`socket closed code=${code} reason=${r}`);
-        for (const [, p] of this.pending) {
-          clearTimeout(p.timer);
-          p.reject(new Error(`socket closed (${code}) ${r}`));
-        }
-        this.pending.clear();
-      });
-    });
+    } catch (error) {
+      this.disconnect();
+      if (controller.signal.aborted) throw controller.signal.reason ?? timedOut();
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+      clearTimeout(fallback);
+      if (joined) this.off("joinProjectResponse", joined);
+      if (cancelled) controller.signal.removeEventListener("abort", cancelled);
+      options.signal?.removeEventListener("abort", abort);
+      this.connectionFailure = null;
+    }
+  }
+
+  private rejectPending(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  private protocolFailure(error: Error): void {
+    this.connectionFailure?.(error);
+    this.rejectPending(error);
+    this.disconnect();
   }
 
   private startHeartbeats(): void {
@@ -218,7 +236,7 @@ class OverleafSocket {
     // only on the first three.
     const m = frame.match(/^(\d+):([^:]*):([^:]*):?([\s\S]*)$/);
     if (!m) {
-      logger.debug("ignoring unparseable frame", frame.slice(0, 120));
+      this.protocolFailure(new OverleafProtocolError("socket.frame", "protocol", "Socket.IO 0.9 type:id:endpoint:data", "unparseable frame (" + frame.length + " characters)"));
       return;
     }
     const type = m[1];
@@ -226,7 +244,7 @@ class OverleafSocket {
     const data = m[4];
     switch (type) {
       case "0": // disconnect
-        logger.warn("server sent disconnect frame");
+        this.log.warn("server sent disconnect frame");
         try { this.ws?.close(); } catch { /* ignore */ }
         return;
       case "1": // connect ack — usually with empty endpoint
@@ -237,12 +255,26 @@ class OverleafSocket {
       case "5": {
         // Event: `5:<id>[+]::{"name":"event","args":[...]}`
         let obj: { name?: string; args?: unknown[] } = {};
-        try { obj = JSON.parse(data); } catch { return; }
+        try { obj = JSON.parse(data); } catch {
+          this.protocolFailure(new OverleafProtocolError("socket.frame", "protocol", "event JSON { name, args }", "invalid JSON"));
+          return;
+        }
+        if (!obj || typeof obj.name !== "string" || (obj.args !== undefined && !Array.isArray(obj.args))) {
+          this.protocolFailure(new OverleafProtocolError("socket.frame", "schema", "event JSON { name: string, args: array }", describeShape(obj)));
+          return;
+        }
         const name = obj.name;
         if (!name) return;
         const args = obj.args ?? [];
+        if (name === "connectionRejected") {
+          const reason = JSON.stringify(args);
+          this.protocolFailure(/invalid session|not authenticated|unauthorized/i.test(reason)
+            ? new OverleafAuthError("connectionRejected: " + reason)
+            : new OverleafProtocolError("socket.joinProject", "rejection", "accepted connection", reason));
+          return;
+        }
         const ls = this.listeners.get(name);
-        if (ls) for (const l of ls) try { l(args); } catch (e) { logger.error(`listener for ${name} threw`, e); }
+        if (ls) for (const l of ls) try { l(args); } catch (e) { this.log.error(`listener for ${name} threw`, e); }
         // Track-changes / reciveNewDoc / etc may also acknowledge with msg id;
         // we ignore that for now since Overleaf doesn't appear to expect a
         // response from us for server-emitted events.
@@ -261,31 +293,35 @@ class OverleafSocket {
         clearTimeout(pending.timer);
         let arr: unknown[] = [];
         if (ackDataRaw) {
-          try { arr = JSON.parse(ackDataRaw); } catch { arr = [ackDataRaw]; }
-          if (!Array.isArray(arr)) arr = [arr];
+          try { arr = JSON.parse(ackDataRaw); } catch {
+            pending.reject(new OverleafProtocolError(pending.event, "protocol", "ACK [error, ...result]", "invalid ACK JSON"));
+            return;
+          }
+          if (!Array.isArray(arr)) {
+            pending.reject(new OverleafProtocolError(pending.event, "schema", "ACK [error, ...result]", describeShape(arr)));
+            return;
+          }
         }
         // Overleaf's ack convention: first element is the error (null on
         // success); remaining elements are the result.
         const err = arr[0];
-        if (err) pending.reject(err instanceof Error ? err : new Error(typeof err === "string" ? err : JSON.stringify(err)));
+        if (err) {
+          const reason = typeof err === "string" ? err : JSON.stringify(err);
+          pending.reject(/invalid session|not authorized|unauthorized/i.test(reason)
+            ? new OverleafAuthError(reason)
+            : new OverleafProtocolError(pending.event, "rejection", "ACK [null, ...result]", reason));
+        }
         else pending.resolve(arr.slice(1));
         return;
       }
       case "7": {
-        // Type-7 frames are rare and usually mean the server invalidated our
-        // session (cookie expired server-side, etc). Reject all pending acks
-        // with an OverleafAuthError so the reconnect/retry wrapper picks them
-        // up, and close the WS so the next ensureSocketForProject doesn't
-        // hand back this broken instance.
-        logger.error("server error frame, treating as auth-recoverable", data);
-        const authErr = new OverleafAuthError(`server error frame: ${data}`);
-        for (const [, p] of this.pending) {
-          clearTimeout(p.timer);
-          p.reject(authErr);
-        }
-        this.pending.clear();
-        this.closed = true;
-        try { this.ws?.close(); } catch { /* ignore */ }
+        // Only explicit authentication evidence permits cookie recovery.
+        // Unknown protocol errors must not erase credentials or open Chrome.
+        this.log.error("server error frame", data);
+        const error = /invalid session|not authorized|unauthorized/i.test(data)
+          ? new OverleafAuthError(`server error frame: ${data}`)
+          : new OverleafProtocolError("socket.frame", "rejection", "accepted Socket.IO session", data);
+        this.protocolFailure(error);
         return;
       }
       default:
@@ -321,9 +357,10 @@ class OverleafSocket {
     return await new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(ackId);
-        reject(new Error(`event '${name}' timed out after ${timeoutMs}ms`));
+        reject(new OverleafProtocolError(name, "timeout", "event ACK before deadline", `event '${name}' timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pending.set(ackId, {
+        event: name,
         resolve: (data) => resolve((data.length <= 1 ? data[0] : data) as T),
         reject,
         timer,
@@ -342,8 +379,12 @@ class OverleafSocket {
 
   disconnect(): void {
     this.stopHeartbeats();
+    this.closed = true;
+    const error = new OverleafProtocolError("socket.transport", "transport", "open socket", "socket closed by client");
+    this.connectionFailure?.(error);
+    this.rejectPending(error);
     if (this.ws) {
-      try { this.ws.close(); } catch { /* ignore */ }
+      try { this.ws.terminate(); } catch { /* ignore */ }
       this.ws = null;
     }
     this.closed = true;
@@ -443,11 +484,23 @@ export async function joinDoc(docId: string): Promise<JoinDocResult> {
       "joinDoc",
       [docId, { encodeRanges: true }],
     );
-    const tuple = Array.isArray(ret) ? ret : [ret];
-    const [docLinesAscii, version, updates, ranges] = tuple as [string[], number, unknown[], unknown];
-    const docLines = (docLinesAscii ?? []).map(decodePackedUtf8);
-    return { docLines, version: version ?? 0, updates: updates ?? [], ranges };
+    return parseJoinDocResponse(ret);
   });
+}
+
+export function parseJoinedProject(value: unknown, projectId: string): ProjectEntity {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("_id" in value) || value._id !== projectId || !("name" in value) || typeof value.name !== "string") {
+    throw new OverleafProtocolError("socket.joinProject", "schema", "project { _id: requested projectId, name: string, rootFolder: Folder[] }", describeShape(value));
+  }
+  return value as ProjectEntity;
+}
+
+export function parseJoinDocResponse(value: unknown): JoinDocResult {
+  const expected = "joinDoc ACK [null, string[] packed UTF-8 lines, nonnegative integer version, updates?, ranges?]";
+  if (!Array.isArray(value) || !Array.isArray(value[0]) || !value[0].every((line: unknown) => typeof line === "string") || !Number.isSafeInteger(value[1]) || value[1] < 0 || (value[2] != null && !Array.isArray(value[2]))) {
+    throw new OverleafProtocolError("socket.joinDoc", "schema", expected, describeShape(value));
+  }
+  return { docLines: value[0].map(decodePackedUtf8), version: value[1], updates: value[2] ?? [], ranges: value[3] };
 }
 
 export async function leaveDoc(docId: string): Promise<void> {

@@ -1,4 +1,4 @@
-import { getIdentity } from "../session/identity.js";
+import { getIdentity, type Identity } from "../session/identity.js";
 import { withAuthRetry } from "../session/recovery.js";
 import { OverleafApiError, OverleafAuthError } from "./errors.js";
 
@@ -18,12 +18,24 @@ function throwIfAuthBad(res: Response): void {
   }
 }
 
-export async function olGet(path: string, extraHeaders: Record<string, string> = {}): Promise<Response> {
-  return withAuthRetry(async () => {
-    const id = await getIdentity();
+// An explicit identity bypasses browser recovery and cookie eviction. The
+// caller owns cancellation; ordinary MCP calls retain their recovery behavior.
+export interface HttpContext {
+  identity: Identity;
+  signal?: AbortSignal;
+}
+
+async function withIdentity<T>(context: HttpContext | undefined, fn: (identity: Identity) => Promise<T>): Promise<T> {
+  if (context) return fn(context.identity);
+  return withAuthRetry(async () => fn(await getIdentity()));
+}
+
+export async function olGet(path: string, extraHeaders: Record<string, string> = {}, context?: HttpContext): Promise<Response> {
+  return withIdentity(context, async (id) => {
     const res = await fetch(joinUrl(id.baseUrl, path), {
       method: "GET",
       redirect: "manual",
+      signal: context?.signal,
       headers: { Cookie: id.cookie, Connection: "keep-alive", ...extraHeaders },
     });
     throwIfAuthBad(res);
@@ -35,12 +47,13 @@ export async function olPostJson(
   path: string,
   body: Record<string, unknown> = {},
   extraHeaders: Record<string, string> = {},
+  context?: HttpContext,
 ): Promise<Response> {
-  return withAuthRetry(async () => {
-    const id = await getIdentity();
+  return withIdentity(context, async (id) => {
     const res = await fetch(joinUrl(id.baseUrl, path), {
       method: "POST",
       redirect: "manual",
+      signal: context?.signal,
       headers: {
         Cookie: id.cookie,
         Connection: "keep-alive",
@@ -53,6 +66,15 @@ export async function olPostJson(
     throwIfAuthBad(res);
     return res;
   });
+}
+
+export async function olOptions(path: string, context: HttpContext): Promise<Response> {
+  const res = await fetch(joinUrl(context.identity.baseUrl, path), {
+    method: "OPTIONS", redirect: "manual", signal: context.signal,
+    headers: { Cookie: context.identity.cookie },
+  });
+  throwIfAuthBad(res);
+  return res;
 }
 
 export async function olDelete(path: string, extraHeaders: Record<string, string> = {}): Promise<Response> {
