@@ -2,17 +2,21 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocketServer } from "ws";
 
 import { aggregateResults, DiagnosticError, failureResult, withDeadline, type DiagnosticResult } from "../../src/diagnostics/model.js";
 import { DiagnosticRedactor } from "../../src/diagnostics/redact.js";
 import { formatReport } from "../../src/diagnostics/format.js";
 import { runDiagnostics, type DiagnosticOptions } from "../../src/diagnostics/run.js";
-import { checkCompileResponse } from "../../src/diagnostics/contracts.js";
+import { checkCompileResponse, checkProjectTree } from "../../src/diagnostics/contracts.js";
+import { getClientMetadata } from "../../src/diagnostics/client.js";
 import { parseDiagnosticArgs } from "../../src/diagnose.js";
-import { OverleafProtocolError } from "../../src/api/errors.js";
+import { OverleafApiError, OverleafAuthError, OverleafProtocolError } from "../../src/api/errors.js";
 
 const projectId = "a".repeat(24);
 const docId = "b".repeat(24);
@@ -86,6 +90,28 @@ describe("unified secret redaction in human and JSON reports", () => {
 });
 
 describe("deadline and error classification", () => {
+  for (const error of [new OverleafAuthError("HTTP 403 on request"), new OverleafApiError(403, "Forbidden")]) {
+    it(`classifies unvalidated 403 as authentication (${error.name})`, () => {
+      const failure = failureResult({ id: "compile.response", area: "Compilation", category: "COMPILE_API" }, error);
+      assert.equal(failure.category, "AUTHENTICATION");
+      assert.match(failure.recommendation!.join(" "), /login/);
+    });
+    it(`keeps authenticated 403 in the endpoint category (${error.name})`, () => {
+      const failure = failureResult({ id: "compile.response", area: "Compilation", category: "COMPILE_API" }, error, { sessionValidated: true });
+      assert.equal(failure.category, "COMPILE_API");
+      assert.match(failure.observed!, /403 after authenticated session/);
+      assert.match(failure.recommendation!.join(" "), /CSRF semantics, project permissions, endpoint policy, or protocol drift/);
+      assert.doesNotMatch(failure.recommendation!.join(" "), /\blogin\b/i);
+    });
+  }
+
+  for (const message of ["HTTP 401 on request", "redirected to /login — session expired", "invalid session", "invalid session (HTTP 403)"]) {
+    it(`preserves explicit authentication evidence after session validation: ${message}`, () => {
+      const failure = failureResult({ id: "compile.response", area: "Compilation", category: "COMPILE_API" }, new OverleafAuthError(message), { sessionValidated: true });
+      assert.equal(failure.category, "AUTHENTICATION");
+    });
+  }
+
   it("bounds a non-returning operation and sends cancellation", async () => {
     let aborted = false;
     const started = Date.now();
@@ -114,6 +140,61 @@ describe("deadline and error classification", () => {
   });
 });
 
+describe("project root folder contract", () => {
+  const root = { _id: folderId, name: "root", docs: [], fileRefs: [], folders: [] };
+  it("accepts a valid empty project with one root folder", () => {
+    assert.deepEqual(checkProjectTree({ _id: projectId, name: "Empty", rootFolder: [root] }).rootFolder, [root]);
+  });
+  for (const tree of [{ rootFolder: [] }, { rootFolder: [root, root] }, { rootFolder: [{ ...root, docs: {} }] }, { renamedRootFolder: [root] }]) {
+    it(`rejects missing, empty, multiple or drifted root structure: ${JSON.stringify(tree)}`, () => {
+      assert.throws(() => checkProjectTree({ _id: projectId, name: "Drift", ...tree }), (error: unknown) => {
+        assert.ok(error instanceof DiagnosticError);
+        assert.equal(error.category, "SOCKET_PROTOCOL");
+        assert.match(error.expected, /exactly one/);
+        assert.match(error.observed, /rootFolder/);
+        return true;
+      });
+    });
+  }
+});
+
+describe("diagnostic client metadata", () => {
+  it("reports package version and the package checkout's Git revision", () => {
+    const metadata = getClientMetadata();
+    const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+    assert.equal(metadata.version, pkg.version);
+    const git = spawnSync("git", ["rev-parse", "HEAD"], { cwd: fileURLToPath(new URL("../../", import.meta.url)), encoding: "utf8", timeout: 1000, windowsHide: true });
+    assert.equal(metadata.revision, git.status === 0 ? git.stdout.trim() : null);
+    assert.deepEqual(aggregateResults([]).client, metadata);
+    assert.deepEqual(JSON.parse(formatReport(aggregateResults([]), true)).client, metadata);
+  });
+
+  it("tolerates absent metadata, installed packages outside Git and failed revision lookup", () => {
+    const dir = mkdtempSync(join(tmpdir(), "overleaf-diagnostic-client-"));
+    const root = pathToFileURL(dir + "/");
+    try {
+      assert.deepEqual(getClientMetadata(root), { version: null, revision: null });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ version: "test-version" }));
+      assert.deepEqual(getClientMetadata(root), { version: "test-version", revision: null });
+      // An invalid .git file forces a lookup failure even if a parent is a repo.
+      writeFileSync(join(dir, ".git"), "gitdir: ./missing-git-directory\n");
+      assert.deepEqual(getClientMetadata(root), { version: "test-version", revision: null });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("does not use the caller or an unrelated ancestor repository for an installed package", () => {
+    const dir = mkdtempSync(join(tmpdir(), "overleaf-diagnostic-installed-"));
+    try {
+      // Point an ancestor at a real checkout; the package itself has no .git.
+      writeFileSync(join(dir, ".git"), `gitdir: ${fileURLToPath(new URL("../../.git", import.meta.url)).replaceAll("\\", "/")}\n`);
+      const installed = join(dir, "installed");
+      mkdirSync(installed);
+      writeFileSync(join(installed, "package.json"), JSON.stringify({ version: "installed-version" }));
+      assert.deepEqual(getClientMetadata(pathToFileURL(installed + "/")), { version: "installed-version", revision: null });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 interface FixtureOptions {
   authStatus?: number;
   loginHTML?: boolean;
@@ -134,6 +215,7 @@ interface FixtureOptions {
   malformedAck?: boolean;
   missingRoot?: boolean;
   emptyDocs?: boolean;
+  rootFolder?: unknown;
   compile?: unknown;
   log?: string;
   ranges?: unknown;
@@ -141,13 +223,15 @@ interface FixtureOptions {
   optionsStatus?: number;
   delayPath?: string;
   asset?: boolean;
+  forbiddenPath?: string;
+  downstreamStatus?: number;
 }
 
 async function fixture(options: FixtureOptions = {}) {
   const text = "\\documentclass{article}\nPrivate thesis text 😊";
   const project = {
     _id: projectId, name: "Private project", rootDoc_id: options.missingRoot ? undefined : docId,
-    rootFolder: [{ _id: folderId, name: "root", docs: options.emptyDocs ? [] : [{ _id: docId, name: "main.tex" }], folders: [], fileRefs: options.asset ? [{ _id: "d".repeat(24), name: "figure.png" }] : [] }],
+    rootFolder: options.rootFolder ?? [{ _id: folderId, name: "root", docs: options.emptyDocs ? [] : [{ _id: docId, name: "main.tex" }], folders: [], fileRefs: options.asset ? [{ _id: "d".repeat(24), name: "figure.png" }] : [] }],
     track_changes_state: true,
   };
   const threads = { thread: { messages: [{ id: "message", content: "Private comment", timestamp: 123 }], resolved: false } };
@@ -162,6 +246,7 @@ async function fixture(options: FixtureOptions = {}) {
     requests.push({ method: req.method!, path, body });
     if (path === options.delayPath) return; // intentionally never returns
     const json = (data: unknown, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
+    if (path === options.forbiddenPath) { json({ error: "Forbidden" }, options.downstreamStatus ?? 403); return; }
     if (path === "/project") {
       if (options.authStatus) { res.writeHead(options.authStatus, { location: "/login?token=fresh-login-token-123" }); res.end("rejected"); return; }
       if (options.loginHTML) { res.end('<form action="/login"></form>'); return; }
@@ -220,6 +305,71 @@ async function fixture(options: FixtureOptions = {}) {
 }
 
 describe("diagnostics against production transports and a simulated Overleaf service", () => {
+  for (const [path, id, category] of [
+    ["/api/project", "http.projects", "HTTP_ENDPOINT"],
+    ["/socket.io/1/", "socket.handshake", "SOCKET_HANDSHAKE"],
+    [`/project/${projectId}/compile`, "compile.response", "COMPILE_API"],
+    [`/project/${projectId}/threads`, "comments.threads", "COMMENTS"],
+    [`/project/${projectId}/ranges`, "review.ranges", "TRACK_CHANGES"],
+    [`/Project/${projectId}/upload`, "upload.endpoint", "UPLOAD_API"],
+    [`/project/${projectId}/file/${"d".repeat(24)}`, "http.fileDownload", "HTTP_ENDPOINT"],
+  ]) it(`classifies authenticated downstream 403 for ${id} as ${category}`, async () => {
+    const f = await fixture({ forbiddenPath: path, asset: true });
+    try {
+      const report = await f.run();
+      assert.equal(report.results.find((r) => r.id === "auth.session")?.status, "pass");
+      const failure = report.results.find((r) => r.id === id)!;
+      assert.equal(failure.status, "fail");
+      assert.equal(failure.category, category);
+      assert.match(failure.observed!, /403 after authenticated session/);
+      assert.match(failure.recommendation!.join(" "), /CSRF semantics, project permissions, endpoint policy, or protocol drift/);
+      assert.doesNotMatch(failure.recommendation!.join(" "), /\blogin\b/i);
+    } finally { await f.cleanup(); }
+  });
+
+  it("retains authentication classification for a downstream HTTP 401", async () => {
+    const f = await fixture({ forbiddenPath: `/project/${projectId}/compile`, downstreamStatus: 401 });
+    try {
+      const report = await f.run();
+      assert.equal(report.results.find((r) => r.id === "auth.session")?.status, "pass");
+      assert.equal(report.results.find((r) => r.id === "compile.response")?.category, "AUTHENTICATION");
+    } finally { await f.cleanup(); }
+  });
+
+  for (const [threads, status, count] of [
+    [{}, "partial", 0],
+    [{ thread: { messages: [] } }, "partial", 0],
+    [{ thread: { messages: [{ content: "Private comment", timestamp: 123 }] } }, "pass", 1],
+    [{ empty: { messages: [] }, populated: { messages: [{ content: "Private comment", timestamp: 123 }] } }, "pass", 1],
+    [{ thread: { messages: [{ content: "Private comment" }] } }, "fail", 0],
+  ] as [unknown, string, number][]) it(`comments coverage is ${status} with ${JSON.stringify(threads)}`, async () => {
+    const f = await fixture({ threads });
+    try {
+      const report = await f.run({ compile: false });
+      const entry = report.results.find((r) => r.id === "comments.threads")!;
+      assert.equal(entry.status, status);
+      if (status === "partial") assert.match(entry.summary, /message schema NOT VERIFIED/);
+      if (status === "pass") assert.match(entry.summary, new RegExp(`${count} messages`));
+      if (status === "fail") assert.equal(entry.category, "COMMENTS");
+      assert.ok(!formatReport(report, true).includes("Private comment"));
+    } finally { await f.cleanup(); }
+  });
+
+  it("reports empty rootFolder as explicit project-tree schema failure", async () => {
+    const f = await fixture({ rootFolder: [] });
+    try {
+      const report = await f.run();
+      const failure = report.results.find((r) => r.id === "socket.projectTree")!;
+      assert.equal(failure.status, "fail");
+      assert.equal(failure.category, "SOCKET_PROTOCOL");
+      assert.equal(failure.kind, "schema");
+      assert.match(failure.expected!, /exactly one/);
+      assert.match(failure.observed!, /rootFolder/);
+      assert.equal(report.overall, "failed");
+      for (const id of ["socket.joinDoc", "compile.response", "upload.endpoint"]) assert.equal(report.results.find((r) => r.id === id)?.status, "skip");
+    } finally { await f.cleanup(); }
+  });
+
   it("reads an existing asset without storing or uploading it", async () => {
     const f = await fixture({ asset: true });
     try {
@@ -367,7 +517,11 @@ describe("diagnostics against production transports and a simulated Overleaf ser
         assert.equal(report.results.find((r) => r.id === "socket.handshake")?.status, "skip");
         assert.ok(!f.requests.some((r) => r.path.includes("socket.io")));
       }
-      if (options.emptyDocs) assert.equal(report.results.find((r) => r.id === "socket.joinDoc")?.status, "skip");
+      if (options.emptyDocs) {
+        assert.equal(report.results.find((r) => r.id === "socket.joinDoc")?.status, "skip");
+        assert.equal(report.results.find((r) => r.id === "socket.projectTree")?.status, "pass");
+        assert.match(report.results.find((r) => r.id === "socket.projectTree")!.summary, /0 documents, 0 assets/);
+      }
       if (options.missingRoot) assert.equal(report.results.find((r) => r.id === "compile.response")?.status, "skip");
       if (options.threads) for (const id of ["comments.threads", "review.ranges", "upload.endpoint"]) assert.equal(report.results.find((r) => r.id === id)?.status, "partial");
     } finally { await f.cleanup(); }
@@ -398,6 +552,11 @@ describe("diagnostics against production transports and a simulated Overleaf ser
 });
 
 describe("CLI and credential-free failure paths", () => {
+  it("keeps the documented npm diagnose entrypoint", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+    assert.equal(pkg.scripts.diagnose, "node dist/diagnose.js");
+  });
+
   it("validates flags and rejects unsupported write modes", () => {
     assert.equal(parseDiagnosticArgs(["--json", "--no-compile", "--project", projectId, "--timeout-ms", "200"]).timeoutMs, 200);
     for (const args of [["--full"], ["--write"], ["--project"], ["--timeout-ms", "0"], ["--compile-timeout-ms", "999999999"], ["--timeout-ms", "NaN"]]) assert.throws(() => parseDiagnosticArgs(args));

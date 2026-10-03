@@ -54,6 +54,7 @@ export async function runDiagnostics(options: DiagnosticOptions = {}, dependenci
   redactor.add(config.csrfOverride);
   const timeout = options.timeoutMs ?? 10_000;
   const compileTimeout = options.compileTimeoutMs ?? 60_000;
+  let sessionValidated = false;
   const spec = (id: string, area: string, category: DiagnosticCategory, expected: string): Spec => ({ id, area, category, expected, ...GUIDE[area] });
   const add = (result: DiagnosticResult) => {
     const safe = redactor.value(result);
@@ -69,7 +70,7 @@ export async function runDiagnostics(options: DiagnosticOptions = {}, dependenci
       add({ ...s, status: outcome.status ?? "pass", summary: outcome.summary, details: outcome.details, observed: outcome.observed, durationMs: Date.now() - started });
       return outcome.value;
     } catch (error) {
-      add({ ...failureResult(s, error), durationMs: Date.now() - started });
+      add({ ...failureResult(s, error, { sessionValidated }), durationMs: Date.now() - started });
       return undefined;
     }
   };
@@ -115,6 +116,7 @@ export async function runDiagnostics(options: DiagnosticOptions = {}, dependenci
     identity.userId = userId;
     return { value: html, summary: "Saved session accepted; identity markup recognized" };
   }) : (skip(sessionCheck, "Blocked by environment or missing session"), undefined);
+  sessionValidated = html !== undefined;
   const csrfSpec = spec("auth.csrf", "Authentication", "HTTP_SCHEMA", "ol-csrfToken discovery or explicit OL_CSRF");
   let csrfReady = false;
   if (html !== undefined) csrfReady = Boolean(await check(csrfSpec, async () => {
@@ -163,14 +165,14 @@ export async function runDiagnostics(options: DiagnosticOptions = {}, dependenci
         add({ ...joinSpec, status: "pass", summary: "Realtime project metadata received and identity matched", durationMs: Date.now() - started });
       } catch (error) {
         socket.disconnect();
-        add({ ...failureResult(currentSpec, error), durationMs: Date.now() - started });
+        add({ ...failureResult(currentSpec, error, { sessionValidated }), durationMs: Date.now() - started });
       }
       for (const s of [handshakeSpec, transportSpec, joinSpec]) if (!results.some((r) => r.id === s.id)) skip(s, "Blocked by preceding realtime stage");
     } else for (const s of [handshakeSpec, transportSpec, joinSpec]) skip(s, projectReason);
     const treeSpec = spec("socket.projectTree", "Realtime", "SOCKET_PROTOCOL", "joinProject project.rootFolder and document/file entities");
     if (project) entities = await check(treeSpec, async () => {
       project = checkProjectTree(project);
-      const flat = project.rootFolder[0] ? flattenTree(project.rootFolder[0]) : [];
+      const flat = flattenTree(project.rootFolder[0]);
       return { value: flat, summary: `Project tree schema recognized (${flat.filter((e) => e.kind === "doc").length} documents, ${flat.filter((e) => e.kind === "file").length} assets)` };
     });
     else skip(treeSpec, projectReason);
@@ -243,7 +245,8 @@ export async function runDiagnostics(options: DiagnosticOptions = {}, dependenci
     if (projectId && html !== undefined) await check(threadsSpec, async (signal) => {
       const threads = checkThreads(await asJson(await olGet(`project/${projectId}/threads`, {}, context(signal))));
       const count = Object.keys(threads).length;
-      return { value: threads, status: count ? "pass" : "partial", summary: count ? `Comments endpoint and thread schema recognized (${count} threads); messages omitted` : "Comments endpoint returned empty map; populated message schema NOT VERIFIED" };
+      const messageCount = Object.values(threads).reduce((n, thread) => n + thread.messages.length, 0);
+      return { value: threads, status: messageCount ? "pass" : "partial", summary: messageCount ? `Comments endpoint, thread and message schemas recognized (${count} threads, ${messageCount} messages); contents omitted` : count ? `Comments thread containers recognized (${count} threads); populated message schema NOT VERIFIED` : "Comments endpoint returned empty map; populated message schema NOT VERIFIED" };
     }); else skip(threadsSpec, projectReason);
 
     const compileSpec = spec("compile.response", "Compilation", "COMPILE_API", "POST compile accepts concrete rootResourcePath and returns recognized status/outputFiles");

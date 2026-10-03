@@ -17,8 +17,8 @@ function contract<T>(schema: z.ZodType<T>, value: unknown, category: DiagnosticC
 const entity = z.object({ _id: z.string().min(1), name: z.string() }).passthrough();
 const folder: z.ZodType<FolderEntity> = z.lazy(() => entity.extend({ docs: z.array(entity), fileRefs: z.array(entity), folders: z.array(folder) }));
 export function checkProjectTree(value: unknown): ProjectEntity {
-  return contract(z.object({ _id: z.string(), name: z.string(), rootDoc_id: z.string().optional(), rootFolder: z.array(folder).max(1) }).passthrough(), value,
-    "SOCKET_PROTOCOL", "project.rootFolder: [folder{_id,name,docs[],fileRefs[],folders[]}]; project.rootDoc_id?: string") as ProjectEntity;
+  return contract(z.object({ _id: z.string(), name: z.string(), rootDoc_id: z.string().optional(), rootFolder: z.array(folder).length(1) }).passthrough(), value,
+    "SOCKET_PROTOCOL", "project.rootFolder: exactly one folder{_id,name,docs[],fileRefs[],folders[]}; project.rootDoc_id?: string") as ProjectEntity;
 }
 
 const metadata = z.object({ user_id: z.string().optional(), ts: z.string().optional() }).passthrough().optional();
