@@ -1,26 +1,15 @@
 {
-  "name": "@netique/overleaf-mcp",
+  "name": "overleaf-mcp",
   "version": "0.3.6",
   "description": "MCP server for Overleaf with tracked-changes support, via the Socket.IO web API (not the Git bridge).",
   "type": "module",
-  "bin": {
-    "overleaf-mcp": "./dist/index.js"
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/netique/overleaf-mcp.git"
+    "url": "git+https://github.com/Eureka2001/overleaf-mcp.git"
   },
-  "homepage": "https://github.com/netique/overleaf-mcp#readme",
+  "homepage": "https://github.com/Eureka2001/overleaf-mcp#readme",
   "bugs": {
-    "url": "https://github.com/netique/overleaf-mcp/issues"
-  },
-  "publishConfig": {
-    "access": "public"
+    "url": "https://github.com/Eureka2001/overleaf-mcp/issues"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/finalize-build.mjs",
@@ -28,8 +17,7 @@
     "start": "node dist/index.js",
     "diagnose": "node dist/diagnose.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node tests/run-unit-tests.mjs",
-    "prepublishOnly": "npm run build"
+    "test": "node tests/run-unit-tests.mjs"
   },
   "keywords": [
     "overleaf",

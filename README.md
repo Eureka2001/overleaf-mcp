@@ -1,8 +1,8 @@
 # overleaf-mcp
 
-An MCP server for [Overleaf](https://www.overleaf.com) that lets a Claude or other agent navigate projects, read/edit `.tex` files, compile, and work with review-panel comments — over Overleaf's **real web/Socket.IO API**, the same channel the official web editor uses.
+An MCP server for [Overleaf](https://www.overleaf.com) that lets an agent navigate projects, read/edit `.tex` files, compile, and work with review-panel comments — over Overleaf's **real web/Socket.IO API**, the same channel the official web editor uses.
 
-The one feature no existing Overleaf MCP can deliver: when a project has **track-changes** enabled, the agent's edits appear as **pending suggestions in the Review panel**, the same way a human collaborator's edits do. You and your collaborators can accept or reject each suggestion. You can also ask the agend to accept/reject them (e.g. *"accept all suggestions about typos"*).
+The one feature no existing Overleaf MCP can deliver: when a project has **track-changes** enabled, the agent's edits appear as **pending suggestions in the Review panel**, the same way a human collaborator's edits do. You and your collaborators can accept or reject each suggestion. You can also ask the agent to accept/reject them (e.g. *"accept all suggestions about typos"*).
 
 ## Why a new MCP
 
@@ -15,9 +15,11 @@ The [`overleaf-workshop`](https://github.com/overleaf-workshop/overleaf-workshop
 
 `overleaf-mcp` solves both: a minimal Socket.IO 0.9 client over `fetch` + `ws@8`, plus the `meta.tc` ID seed on `applyOtUpdate` that flips Overleaf's server-side `RangesTracker` into track-changes mode.
 
-## Status
+## Why a new fork
 
-This fork provides 24 tools, including historical TeX source and compact version comparisons, compiled PDF download, asset upload and project search. The upstream package is published on npm as [`@netique/overleaf-mcp`](https://www.npmjs.com/package/@netique/overleaf-mcp); use the source installation below to run this fork's additions.
+This repository is a fork of [netique/overleaf-mcp](https://github.com/netique/overleaf-mcp) and continues its development here. Upstream no longer appears to be actively maintained, so changes in this repository will not be regularly merged back or contributed upstream — many thanks to the upstream project for the foundation it provided.
+
+This fork ships 24 tools, including historical TeX source reading and compact version comparisons, compiled PDF download, asset upload, and project-wide search.
 
 ## Tools
 
@@ -50,7 +52,7 @@ This fork provides 24 tools, including historical TeX source and compact version
 
 ## Typical workflow
 
-Things to ask Claude once `overleaf-mcp` is connected:
+Things to ask your agent once `overleaf-mcp` is connected:
 
 - _"Accept every pending tracked change by John Doe that's only adjusting punctuation or whitespace."_ — uses `list_tracked_changes(author_email: "...")` → LLM filters by op text → `accept_changes(...)`.
 - _"List my recent Overleaf projects."_
@@ -62,32 +64,6 @@ Things to ask Claude once `overleaf-mcp` is connected:
 - _"Compile my paper and download the PDF to an absolute path on my computer."_ → `open_project` → `compile(root_doc: "main.tex")` → `download_pdf(output_path: "D:\\papers\\paper.pdf")`. For a response letter, compile with `root_doc: "response_letter.tex"` before downloading. The destination is on the computer running the MCP server; parent directories are created. Recompile if cached build output has expired or the source has changed. Check `built_cleanly` first if a PDF with LaTeX errors is unacceptable.
 - _"For each open comment thread, suggest a fix and reply with what you did."_  → end-to-end review workflow.
 
-### Historical TeX source and compact comparisons
-
-Use `open_project` first, then `list_history(mode: "labels")` to locate a milestone or `list_history()` for grouped edits. **Project history versions are distinct from the document OT `version` returned by `read_file`**. Use the history version numbers from these tools; they must never be passed to the OT editing API.
-
-`compare_versions(from_version: 123, to_version: "latest")` returns only added/removed/edited/renamed files, their `comparison_path`, `from_path` and `to_path`, and counts. Unchanged files and their bodies are omitted. Pass a returned `comparison_path` to the same tool to see line-numbered `+` / `-` hunks with a few neighboring lines. Names that changed across versions remain linked, and additions/deletions show the source on the existing side. The native diff is checked against both fixed historical snapshots before returning it.
-
-`list_history_files(history_version: 123)` finds the paths that existed at that version. `read_history_file(history_version: 123, path: "main.tex")` returns its **TeX source**, including files that no longer exist in the current tree. It does not fetch a PDF or change the current editor/read baseline. Read the live `read_file` before any subsequent edit.
-
-Source/diff output defaults to `max_chars: 20000` (1000–200000); history text processing is limited to 2 MiB and network JSON to 8 MiB with a 20-second request/body deadline. A truncated source response gives `next_start_line` / `next_start_column`; continue with those values and the returned **integer** `history_version`. Diff continuation uses `next_cursor` with the same versions, path and `context_lines`; overview/file-list cursors also pin `"latest"`. Long paragraphs are continued without losing characters. Metadata pages additionally have a 20000-character budget; collection-level truncation flags identify omitted paths/labels/operations.
-
-History APIs sometimes return hundreds of entries even with a small `min_count`. The tool repaginates without skipping them. The wire field `nextBeforeTimestamp` is actually a **version boundary**, not a timestamp; `next_cursor` hides this detail and is bound to its project and mode.
-
-Full history uses the project's `features.versioning` entitlement. Otherwise the tools expose confirmed recent history (24 hours), labeled snapshots and the latest state; missing entitlement metadata is reported as `history_access: "unknown"` and treated conservatively. A history endpoint's 403 is reported as a project/history permission problem rather than evicting the session. The current SaaS deployment's read endpoints are tested; nonempty labels, free-tier and legacy/self-hosted behavior are covered by fixtures but still require deployment-specific verification. See [Overleaf's history documentation](https://docs.overleaf.com/writing-and-editing/history-and-versioning).
-
-For a very wide interval, Overleaf may reject a diff spanning too many chunks. A single-file comparison at the same path can fall back to the two endpoint snapshots: `diff_source: "snapshot_fallback"`, `attribution_available: false`, `file_identity_verified: false`. This compares endpoint contents without claiming that a file was never deleted/replaced in between. Project-wide identity/rename discovery requires a narrower interval. Binary files are metadata-only, and historical comments/review state are outside this source-reading feature.
-
-All four tools are read-only: no text/OT writes, label changes, history restore, explicit history flush or compilation. The service may materialize existing queued history while handling its ordinary GET requests, as it does for the web editor. Validate the built server with `node tests/manual/history-read.mjs <project-id> [from-version] [to-version] [comparison-path]`; it uses existing data and emits only metadata.
-
-### Asset upload and project search
-
-`upload_file` accepts nonempty assets up to 50 MiB: PNG, JPEG, GIF, WebP, BMP, TIFF, SVG, PDF, EPS, PS, TTF, OTF, WOFF and WOFF2. Paths are on the computer running the MCP server. `project_path` uses forward slashes and defaults to the local basename at project root; folders are not created automatically. The destination extension must represent the same asset type as the source. `.tex`, `.bib`, `.sty`, `.cls`, Markdown and other editable text are refused so uploads cannot bypass tracked editing.
-
-With the default `overwrite: false`, the tool uploads a uniquely named temporary asset, checks its downloaded bytes, then renames it using Overleaf's name-conflict check. A competing upload cannot silently replace the destination. On failure it attempts to remove only its own temporary asset; cleanup or overwrite uncertainty is reported explicitly. Successful results include `file_id`, `path`, `bytes`, `sha256`, `overwritten` and `verified`, and subsequent `list_files` / `read_file` calls see the refreshed tree. Binary assets have no text-review suggestions; changes to LaTeX references still go through tracked edits.
-
-`search_project` refreshes the tree and reads live editable documents; binary assets are skipped. Queries are literal, may span lines, and can contain LaTeX backslashes or regex punctuation. `case_sensitive` defaults to false, `path_contains` is a case-insensitive substring, `context_lines` is 0–3 (default 1), and `max_results` is 1–100 (default 50). Positions are one-based UTF-16 columns with an exclusive end position. Context is bounded to 300 characters per line and 12 lines per match, with truncation flags. `total_matches` counts all non-overlapping occurrences even when returned results are capped. `complete: false` plus `read_errors` and `isError: true` identify a partial search; the successful matches are retained. Versions are per-document snapshots, not a simultaneous snapshot of every file. Search leaves `read_file`'s editing baseline intact: call `read_file` before editing a match.
-
 ## Requirements
 
 - Node ≥ 20
@@ -95,45 +71,7 @@ With the default `overwrite: false`, the tool uploads a uniquely named temporary
 
 ## Quick start
 
-No local install needed — `npx` fetches and runs the latest version. Add this to your Claude Desktop / Claude Code MCP config:
-
-```json
-{
-  "mcpServers": {
-    "overleaf": {
-      "command": "npx",
-      "args": ["-y", "@netique/overleaf-mcp"]
-    }
-  }
-}
-```
-
-The first MCP tool call (or `npx @netique/overleaf-mcp login` run ahead of time) opens a Chrome window pointed at Overleaf — log in normally and the session cookie is captured and saved to a file under your config dir. No DevTools paste, no cookie in your MCP config. When the cookie expires (~5 days), the next tool call re-opens the window and refreshes it.
-
-For self-hosted Community Edition: set `OL_BASE_URL`:
-
-```json
-{
-  "mcpServers": {
-    "overleaf": {
-      "command": "npx",
-      "args": ["-y", "@netique/overleaf-mcp"],
-      "env": { "OL_BASE_URL": "https://overleaf.mylab.edu" }
-    }
-  }
-}
-```
-
-Useful one-shot commands:
-
-```sh
-npx @netique/overleaf-mcp login              # opens Chrome, captures cookie
-npx @netique/overleaf-mcp status             # who am I logged in as
-npx @netique/overleaf-mcp logout --confirm   # clear the saved cookie
-```
-
-<details>
-<summary>From source (for development)</summary>
+Clone and build from source:
 
 ```sh
 git clone https://github.com/Eureka2001/overleaf-mcp.git
@@ -142,7 +80,7 @@ npm install
 npm run build
 ```
 
-Then point your MCP config at the built file:
+Then point your agent's MCP config at the built file:
 
 ```json
 {
@@ -154,7 +92,30 @@ Then point your MCP config at the built file:
   }
 }
 ```
-</details>
+
+The first MCP tool call (or `node dist/index.js login` run ahead of time) opens a Chrome window pointed at Overleaf — log in normally and the session cookie is captured and saved to a file under your config dir. No DevTools paste, no cookie in your MCP config. When the cookie expires (~5 days), the next tool call re-opens the window and refreshes it.
+
+For self-hosted Community Edition: set `OL_BASE_URL` in the server's `env`:
+
+```json
+{
+  "mcpServers": {
+    "overleaf": {
+      "command": "node",
+      "args": ["/absolute/path/to/overleaf-mcp/dist/index.js"],
+      "env": { "OL_BASE_URL": "https://overleaf.mylab.edu" }
+    }
+  }
+}
+```
+
+Useful one-shot commands:
+
+```sh
+node dist/index.js login              # opens Chrome, captures cookie
+node dist/index.js status             # who am I logged in as
+node dist/index.js logout --confirm   # clear the saved cookie
+```
 
 ## Authentication
 
@@ -162,7 +123,7 @@ The session cookie lives in a plaintext file at `<configDir>/overleaf-mcp/cookie
 
 ### How the cookie gets there
 
-`npx @netique/overleaf-mcp login` — or an MCP tool call that finds no stored cookie — spawns Chrome with a **dedicated browser profile** at `<configDir>/overleaf-mcp/chrome-profile/`, points it at `${OL_BASE_URL}/project`, and reads the session cookie via the Chrome DevTools Protocol once the dashboard loads. Why a dedicated profile:
+`node dist/index.js login` — or an MCP tool call that finds no stored cookie — spawns Chrome with a **dedicated browser profile** at `<configDir>/overleaf-mcp/chrome-profile/`, points it at `${OL_BASE_URL}/project`, and reads the session cookie via the Chrome DevTools Protocol once the dashboard loads. Why a dedicated profile:
 
 - We don't touch your real Chrome profile, so there's no macOS Keychain prompt for your everyday browser.
 - It's a real interactive Chrome window, so captcha, Google OAuth, ORCID, institutional SSO and 2FA all work out of the box.
