@@ -6,7 +6,7 @@ Context for Agents (or any future contributor) working in this repo. Read top to
 
 `overleaf-mcp` is an MCP server for Overleaf. It speaks Overleaf's Socket.IO web API (the same channel the official editor uses), **not** the Git bridge. The headline feature: edits land as **tracked changes** in Overleaf's Review panel — every other Overleaf MCP punts to the Git bridge and silently overwrites, which makes them unusable for collaborative academic work.
 
-Tools (20): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, `search_project`, `upload_file`, `edit_file`, `find_and_replace`, `compile`, `read_log`, `download_pdf`, `list_comments`, `read_comment_thread`, `reply_comment`, `resolve_comment`, `reopen_comment`, `list_tracked_changes`, `accept_changes`, `reject_changes`.
+Tools (24): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, `search_project`, `list_history`, `list_history_files`, `read_history_file`, `compare_versions`, `upload_file`, `edit_file`, `find_and_replace`, `compile`, `read_log`, `download_pdf`, `list_comments`, `read_comment_thread`, `reply_comment`, `resolve_comment`, `reopen_comment`, `list_tracked_changes`, `accept_changes`, `reject_changes`.
 
 ## Architecture you should know about before changing things
 
@@ -35,6 +35,17 @@ Tools (20): `ping`, `list_projects`, `open_project`, `list_files`, `read_file`, 
 - **`compile.status === "success"` is misleading** — Overleaf returns it whenever a PDF is generated, even with LaTeX errors (TeX runs in `nonstopmode`). Truthful check is `compile.built_cleanly` (PDF + zero `! `-prefixed log lines). `compile` already fetches `output.log` inline; `read_log` is for deeper inspection.
 
 - **`download_pdf` downloads the last build in the same MCP session**, using the cached `output.pdf` URL plus `clsiserverid` / `compileGroup` through `olGet`. It does not recompile, edit the project, or touch tracked changes. Require an absolute local `.pdf` destination, validate the body signature before writing, and preserve the default exclusive-create behavior (`overwrite: false`). For a different root such as a response letter, call `compile(root_doc: ...)` first. Cached artifacts can expire; recompile in that case.
+
+## Historical source and version comparisons
+
+- `src/api/history.ts` uses only public Web GETs: `/updates`, `/labels`, `/filetree/diff` and `/diff?from=&to=&pathname=`. Same-version tree/text diffs read historical snapshots. The internal project-history `/version/:version/:pathname` route is not a SaaS user endpoint. Read source, never restore/download a PDF to inspect TeX.
+- History versions are project-wide fenceposts, **not doc OT versions**. Histories are grouped intervals, not individual keystrokes. `nextBeforeTimestamp` is a version cursor and `min_count` is not a cap: truncate at the last delivered entry's `fromV` and bind cursors to project/mode/fixed versions. Do not drop overflow entries by advancing to the server page's tail.
+- History must not call `updateDoc`, replace `ActiveProject.entities`, refresh the live tree, switch sockets or update `lastCompile`. Use historical paths; current `findByPath` cannot locate deleted/renamed historical files. Explicit authentication recovery is the existing session-recovery exception; a valid-session history 403 opts out via `HttpContext.forbiddenIsPermission` and must not trigger recovery.
+- Project `features.versioning` controls full-history access. Otherwise confirm recent (24h) or labeled versions before body reads; the latest state remains readable. Unknown entitlement stays `unknown` and is restricted conservatively. HTTP 200 alone does not grant full-history access; the web client also applies its feature gate.
+- `compare_versions` without path returns only changed-file metadata. With path it returns bounded line/paragraph hunks, not entire unchanged documents. Preserve `from_path` / `to_path`; native edited/renamed diffs must reconstruct both endpoint snapshots. Added/removed source uses the existing endpoint; binaries return metadata only. Exact text/diff continuations preserve UTF-16 positions without splitting surrogate pairs.
+- A too-wide range may fall back to same-path endpoint source: report `snapshot_fallback`, no attribution and unverified file identity; do not invent a cross-range rename or author. Project overview requires narrowing the interval if native identity discovery exceeds the server's chunk limit.
+- Every GET and body read is bounded (20s / 8 MiB JSON); source processing is bounded at 2 MiB, with separate output limits. Error bodies/credentials/source do not enter logs. Ordinary GETs may process pending history internally, but the tools never POST flush, restore, modify labels, emit OT, change review data or compile.
+- `tests/unit/history.spec.ts` drives the actual HTTP client against a simulated service, covering overflow pagination, labels, permissions, compact diffs, file lifecycle, Unicode continuations, malformed/oversized responses, cancellation and live-cache isolation. `tests/manual/history-read.mjs` uses existing history, checks stdio tool registration and emits metadata only.
 
 ## License & contribution
 

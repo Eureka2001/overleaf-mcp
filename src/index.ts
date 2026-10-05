@@ -16,6 +16,7 @@ import { registerUploadFile } from "./tools/uploadFile.js";
 import { registerSearchProject } from "./tools/searchProject.js";
 import { registerComments } from "./tools/comments.js";
 import { registerTrackedChanges } from "./tools/trackedChanges.js";
+import { registerHistory } from "./tools/history.js";
 import { close as closeActiveProject } from "./session/activeProject.js";
 import { maybeRunCli } from "./auth/cli.js";
 import { logger } from "./util/logger.js";
@@ -36,6 +37,7 @@ const INSTRUCTIONS = [
   "  1. list_projects -> pick an id",
   "  2. open_project(id) -> joins the Socket.IO room, returns file tree + tc state",
   "  3. search_project to locate text; read_file before tracked edits by path",
+  "     list_history -> compare_versions for changed files/paragraphs; read_history_file for historical TeX source",
   "     upload_file(local_path, project_path) for figures/PDFs/fonts in existing folders",
   "  4. compile to verify edits build",
   "  5. download_pdf(output_path) to save the last compiled PDF locally",
@@ -84,6 +86,7 @@ async function main(): Promise<void> {
   registerDownloadPdf(server);
   registerComments(server);
   registerTrackedChanges(server);
+  registerHistory(server);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

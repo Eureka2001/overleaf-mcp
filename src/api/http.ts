@@ -6,14 +6,14 @@ function joinUrl(base: string, path: string): string {
   return `${base}/${path.replace(/^\/+/, "")}`;
 }
 
-function throwIfAuthBad(res: Response): void {
-  if (res.status === 401 || res.status === 403) {
-    throw new OverleafAuthError(`HTTP ${res.status} on ${res.url || "request"}`);
+function throwIfAuthBad(res: Response, forbiddenIsPermission = false): void {
+  if (res.status === 401 || (res.status === 403 && !forbiddenIsPermission)) {
+    throw new OverleafAuthError(forbiddenIsPermission ? `HTTP ${res.status} on history request` : `HTTP ${res.status} on ${res.url || "request"}`);
   }
   if (res.status >= 300 && res.status < 400) {
     const loc = res.headers.get("location") ?? "";
     if (/\/login(\?|$|\/)/i.test(loc)) {
-      throw new OverleafAuthError(`redirected to ${loc} — session expired`);
+      throw new OverleafAuthError(forbiddenIsPermission ? "History request redirected to login — session expired" : `redirected to ${loc} — session expired`);
     }
   }
 }
@@ -23,6 +23,9 @@ function throwIfAuthBad(res: Response): void {
 export interface HttpContext {
   identity: Identity;
   signal?: AbortSignal;
+  // Resource permissions are not evidence of session expiry after identity
+  // validation. Opt in for history; retain existing callers' auth behavior.
+  forbiddenIsPermission?: boolean;
 }
 
 async function withIdentity<T>(context: HttpContext | undefined, fn: (identity: Identity) => Promise<T>): Promise<T> {
@@ -38,7 +41,7 @@ export async function olGet(path: string, extraHeaders: Record<string, string> =
       signal: context?.signal,
       headers: { Cookie: id.cookie, Connection: "keep-alive", ...extraHeaders },
     });
-    throwIfAuthBad(res);
+    throwIfAuthBad(res, context?.forbiddenIsPermission);
     return res;
   });
 }

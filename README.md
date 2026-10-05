@@ -17,7 +17,7 @@ The [`overleaf-workshop`](https://github.com/overleaf-workshop/overleaf-workshop
 
 ## Status
 
-This fork provides 20 tools, including compiled PDF download, asset upload and project search. The upstream package is published on npm as [`@netique/overleaf-mcp`](https://www.npmjs.com/package/@netique/overleaf-mcp); use the source installation below to run this fork's additions.
+This fork provides 24 tools, including historical TeX source and compact version comparisons, compiled PDF download, asset upload and project search. The upstream package is published on npm as [`@netique/overleaf-mcp`](https://www.npmjs.com/package/@netique/overleaf-mcp); use the source installation below to run this fork's additions.
 
 ## Tools
 
@@ -29,6 +29,10 @@ This fork provides 20 tools, including compiled PDF download, asset upload and p
 | `list_files` | Lists the file tree of the open project (cached, no network). Filter by `kind` and `path_contains`. |
 | `read_file` | Reads a doc (returns text + OT version + a summary of tracked changes / comments) or a binary file (base64 + MIME). `path` is optional — defaults to the project's root doc. |
 | `search_project` | Searches live editable documents for literal `query` text, including LaTeX commands. Supports `case_sensitive`, `path_contains`, `context_lines`, `max_results`. Returns paths, line/column positions, context and document versions; reports truncation and per-file failures. |
+| `list_history` | Lists grouped edits or named versions with `mode: "updates"` (default) / `"labels"`. Returns history version numbers, dates, authors, changed paths and `next_cursor`; `limit` defaults to 20. |
+| `list_history_files` | Lists the actual files at `history_version` (integer or `"latest"`), including historical paths of now-renamed/deleted files. Returns file paths and editability; pagination pins the resolved version. |
+| `read_history_file` | Reads historical TeX/text source by `history_version` and `path`. Supports `start_line`, `end_line`, `start_column` and `max_chars`; returns exact continuation positions. Keeps live edit baselines intact. Binary assets are refused. |
+| `compare_versions` | Compares `from_version` to `to_version` (default `"latest"`). Without `path`, returns only changed-file metadata. With `path`, returns compact paragraph/line differences with `context_lines` (default 3), bounded by `max_chars`, and `next_cursor`. Binary files return change metadata. |
 | `upload_file` | Uploads a local image, vector graphic, PDF or font asset to an existing project folder. Takes absolute `local_path`, optional `project_path`, and `overwrite` (default false). Verifies remote bytes and refreshes the file tree. Editable text uploads are prohibited. |
 | `edit_file` | Replaces a doc's contents. Computes a minimal diff via `diff-match-patch`, submits it as an OT operation, and adds `meta.tc` so the edit lands as a pending suggestion in the Review panel by default. Pass `track: "off"` to write directly or `track: "auto"` to honor the project's track-changes setting. `path` is optional — defaults to the project's root doc. |
 | `find_and_replace` | Surgical edit: replace one occurrence (or all, with `replace_all: true`) of `old_string` with `new_string` without re-emitting the rest of the doc. Cheaper in tokens than `edit_file` for targeted changes and avoids whitespace drift from re-emitting surrounding text. By default `old_string` must be unique; ambiguous matches return a list of line:col locations so you can extend the match. Same `track` defaults and OT path as `edit_file`, so it lands as a pending suggestion in the Review panel. |
@@ -57,6 +61,24 @@ Things to ask Claude once `overleaf-mcp` is connected:
 - _"Compile the project and tell me what the LaTeX errors mean."_  → uses `compile` then `read_log` automatically.
 - _"Compile my paper and download the PDF to an absolute path on my computer."_ → `open_project` → `compile(root_doc: "main.tex")` → `download_pdf(output_path: "D:\\papers\\paper.pdf")`. For a response letter, compile with `root_doc: "response_letter.tex"` before downloading. The destination is on the computer running the MCP server; parent directories are created. Recompile if cached build output has expired or the source has changed. Check `built_cleanly` first if a PDF with LaTeX errors is unacceptable.
 - _"For each open comment thread, suggest a fix and reply with what you did."_  → end-to-end review workflow.
+
+### Historical TeX source and compact comparisons
+
+Use `open_project` first, then `list_history(mode: "labels")` to locate a milestone or `list_history()` for grouped edits. **Project history versions are distinct from the document OT `version` returned by `read_file`**. Use the history version numbers from these tools; they must never be passed to the OT editing API.
+
+`compare_versions(from_version: 123, to_version: "latest")` returns only added/removed/edited/renamed files, their `comparison_path`, `from_path` and `to_path`, and counts. Unchanged files and their bodies are omitted. Pass a returned `comparison_path` to the same tool to see line-numbered `+` / `-` hunks with a few neighboring lines. Names that changed across versions remain linked, and additions/deletions show the source on the existing side. The native diff is checked against both fixed historical snapshots before returning it.
+
+`list_history_files(history_version: 123)` finds the paths that existed at that version. `read_history_file(history_version: 123, path: "main.tex")` returns its **TeX source**, including files that no longer exist in the current tree. It does not fetch a PDF or change the current editor/read baseline. Read the live `read_file` before any subsequent edit.
+
+Source/diff output defaults to `max_chars: 20000` (1000–200000); history text processing is limited to 2 MiB and network JSON to 8 MiB with a 20-second request/body deadline. A truncated source response gives `next_start_line` / `next_start_column`; continue with those values and the returned **integer** `history_version`. Diff continuation uses `next_cursor` with the same versions, path and `context_lines`; overview/file-list cursors also pin `"latest"`. Long paragraphs are continued without losing characters. Metadata pages additionally have a 20000-character budget; collection-level truncation flags identify omitted paths/labels/operations.
+
+History APIs sometimes return hundreds of entries even with a small `min_count`. The tool repaginates without skipping them. The wire field `nextBeforeTimestamp` is actually a **version boundary**, not a timestamp; `next_cursor` hides this detail and is bound to its project and mode.
+
+Full history uses the project's `features.versioning` entitlement. Otherwise the tools expose confirmed recent history (24 hours), labeled snapshots and the latest state; missing entitlement metadata is reported as `history_access: "unknown"` and treated conservatively. A history endpoint's 403 is reported as a project/history permission problem rather than evicting the session. The current SaaS deployment's read endpoints are tested; nonempty labels, free-tier and legacy/self-hosted behavior are covered by fixtures but still require deployment-specific verification. See [Overleaf's history documentation](https://docs.overleaf.com/writing-and-editing/history-and-versioning).
+
+For a very wide interval, Overleaf may reject a diff spanning too many chunks. A single-file comparison at the same path can fall back to the two endpoint snapshots: `diff_source: "snapshot_fallback"`, `attribution_available: false`, `file_identity_verified: false`. This compares endpoint contents without claiming that a file was never deleted/replaced in between. Project-wide identity/rename discovery requires a narrower interval. Binary files are metadata-only, and historical comments/review state are outside this source-reading feature.
+
+All four tools are read-only: no text/OT writes, label changes, history restore, explicit history flush or compilation. The service may materialize existing queued history while handling its ordinary GET requests, as it does for the web editor. Validate the built server with `node tests/manual/history-read.mjs <project-id> [from-version] [to-version] [comparison-path]`; it uses existing data and emits only metadata.
 
 ### Asset upload and project search
 
