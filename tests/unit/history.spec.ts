@@ -5,13 +5,15 @@ import { once } from "node:events";
 import { HistoryClient, readHistoryBody } from "../../src/api/history.js";
 import { OverleafAuthError } from "../../src/api/errors.js";
 import { olGet } from "../../src/api/http.js";
-import { createHistoryHandlers, registerHistory } from "../../src/tools/history.js";
+import { CompareVersionsSchema, createHistoryHandlers, ListHistoryFilesSchema, ReadHistoryFileSchema, registerHistory } from "../../src/tools/history.js";
 import { clearDocCache, ensureDocLoaded, updateDoc } from "../../src/session/docCache.js";
 import type { ActiveProject } from "../../src/session/activeProject.js";
 import { encodeCursor } from "../../src/history/cursor.js";
 import { formatHistoryDiff, sliceHistoryText, snapshotDiff } from "../../src/history/diff.js";
-import type { HistoryFile } from "../../src/api/historyTypes.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { HistoryVersionSchema, type HistoryFile } from "../../src/api/historyTypes.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 const PROJECT = "a".repeat(24);
 const NOW = Date.UTC(2026, 9, 5, 4);
@@ -123,6 +125,122 @@ function errorCode(result: Awaited<ReturnType<ReturnType<typeof createHistoryHan
   assert.equal(result.isError, true);
   return (result.structuredContent.error as { code: string }).code;
 }
+
+async function mcpFixture(options: FixtureOptions = {}) {
+  const f = await fixture(options);
+  const server = new McpServer({ name: "history-fixture", version: "1.0" });
+  // Use production registrations and SDK validation with the local HTTP fixture.
+  registerHistory({
+    registerTool(name: keyof typeof f.handlers, config: Parameters<McpServer["registerTool"]>[1]) {
+      return server.registerTool(name, config, f.handlers[name]);
+    },
+  } as unknown as McpServer);
+  const client = new Client({ name: "history-test", version: "1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  cleanups.push(async () => { await client.close(); await server.close(); });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    assert.ok(result.structuredContent);
+    return result.structuredContent as Record<string, any>;
+  };
+  return { ...f, client, call };
+}
+
+describe("history version inputs through MCP", () => {
+  const versionSchemas = [ListHistoryFilesSchema.shape.history_version,
+    ReadHistoryFileSchema.shape.history_version, CompareVersionsSchema.shape.to_version];
+  const invalidVersions = ["", " ", " 6", "6 ", "6\n", "-1", "+6", "6.0", "6.5", "6e0", "0x6",
+    "Infinity", "NaN", "LATEST", "9007199254740992", "9".repeat(400), -1, 6.5, Infinity, NaN,
+    Number.MAX_SAFE_INTEGER + 1, true, null, {}, []];
+
+  it("normalizes decimal strings and preserves safe integer boundaries", () => {
+    for (const schema of versionSchemas) {
+      for (const version of [0, 6, Number.MAX_SAFE_INTEGER]) {
+        assert.equal(schema.parse(version), version);
+        assert.equal(schema.parse(String(version)), version);
+      }
+      assert.equal(schema.parse("0006"), 6);
+      assert.equal(schema.parse("latest"), "latest");
+      for (const value of invalidVersions) assert.equal(schema.safeParse(value).success, false, String(value));
+    }
+    assert.equal(CompareVersionsSchema.parse({ from_version: 3 }).to_version, "latest");
+    assert.equal(HistoryVersionSchema.safeParse("6").success, false, "API response versions remain numeric");
+    assert.equal(CompareVersionsSchema.safeParse({ from_version: "3", to_version: 6 }).success, false);
+  });
+
+  it("advertises numeric, latest and decimal-string inputs in tools/list", async () => {
+    const f = await mcpFixture();
+    const { tools } = await f.client.listTools();
+    for (const [name, field] of [["list_history_files", "history_version"],
+      ["read_history_file", "history_version"], ["compare_versions", "to_version"]]) {
+      const schema = tools.find((tool) => tool.name === name)!.inputSchema.properties![field] as { anyOf: Record<string, unknown>[] };
+      assert.ok(schema.anyOf.some((branch) => branch.type === "integer"));
+      assert.ok(schema.anyOf.some((branch) => branch.const === "latest"));
+      assert.ok(schema.anyOf.some((branch) => branch.type === "string" && branch.pattern === "^\\d+$"));
+    }
+    assert.equal(f.requests.length, 0);
+  });
+
+  it("reads and compares numeric and stringified versions after SDK validation", async () => {
+    const f = await mcpFixture();
+    for (const version of [6, "6", "latest"]) {
+      const files = await f.call("list_history_files", { history_version: version });
+      assert.equal(files.history_version, 6);
+      const read = await f.call("read_history_file", { history_version: version, path: "main.tex" });
+      assert.equal(read.history_version, 6);
+      assert.equal(read.text, newMain);
+      const diff = await f.call("compare_versions", { from_version: 3, to_version: version, path: "main.tex", context_lines: 0 });
+      assert.equal(diff.to_version, 6);
+      assert.equal(diff.content_changed, true);
+      assert.ok(diff.hunks.length);
+    }
+    const old = await f.call("read_history_file", { history_version: "3", path: "main.tex", start_line: 51, end_line: 51 });
+    assert.equal(old.history_version, 3);
+    assert.ok(old.text.includes("Old modified paragraph."));
+    assert.equal((await f.call("compare_versions", { from_version: 3 })).to_version, 6);
+    assert.ok(f.requests.every((request) => request.method === "GET"));
+  });
+
+  it("uses normalized versions when validating and resuming fixed-version cursors", async () => {
+    const f = await mcpFixture();
+    const files = await f.call("list_history_files", { history_version: "6", limit: 1 });
+    const nextFiles = await f.call("list_history_files", { history_version: 6, limit: 1, cursor: files.next_cursor });
+    assert.equal(nextFiles.history_version, 6);
+    assert.notDeepEqual(nextFiles.files, files.files);
+    const diff = await f.call("compare_versions", { from_version: 3, to_version: 6, limit: 1 });
+    const nextDiff = await f.call("compare_versions", { from_version: 3, to_version: "6", limit: 1, cursor: diff.next_cursor });
+    assert.equal(nextDiff.to_version, 6);
+    assert.notDeepEqual(nextDiff.files, diff.files);
+    const wrongVersion = await f.client.callTool({ name: "list_history_files",
+      arguments: { history_version: "3", cursor: files.next_cursor } });
+    assert.equal((wrongVersion.structuredContent?.error as { code: string }).code, "INVALID_CURSOR");
+  });
+
+  it("rejects invalid version inputs before sending HTTP requests", async () => {
+    const f = await mcpFixture();
+    for (const value of invalidVersions.filter((version) => typeof version !== "number" || Number.isFinite(version))) {
+      for (const [name, args] of [["list_history_files", { history_version: value }],
+        ["read_history_file", { history_version: value, path: "main.tex" }],
+        ["compare_versions", { from_version: 3, to_version: value }]] as const) {
+        const result = await f.client.callTool({ name, arguments: args });
+        assert.equal(result.isError, true);
+        assert.ok(JSON.stringify(result.content).includes("Input validation error"));
+      }
+    }
+    assert.equal(f.requests.length, 0);
+  });
+
+  it("applies history access restrictions after normalizing a string version", async () => {
+    const f = await mcpFixture({ versioning: false });
+    const result = await f.client.callTool({ name: "read_history_file", arguments: { history_version: "3", path: "main.tex" } });
+    assert.equal(result.isError, true);
+    assert.equal((result.structuredContent?.error as { code: string }).code, "HISTORY_ACCESS_LIMITED");
+    assert.equal(f.requests.some((request) => request.url.pathname.endsWith("/diff")), false);
+  });
+});
 
 describe("history pagination and versions", () => {
   it("repaginates an oversized API page without skipping updates", async () => {

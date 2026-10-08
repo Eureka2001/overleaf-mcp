@@ -50,6 +50,8 @@ This fork ships 24 tools, including historical TeX source reading and compact ve
 | `resolve_comment` | Marks a thread resolved. |
 | `reopen_comment` | Reopens a resolved thread. |
 
+`list_history_files.history_version`, `read_history_file.history_version` and `compare_versions.to_version` accept a nonnegative safe integer, `"latest"`, or a decimal digit string such as `"9645"`. Digit strings are normalized to numbers before reading history, so clients that stringify union-typed arguments can still use fixed versions. Returned versions and pagination cursors use numbers. `compare_versions.from_version` remains a numeric integer.
+
 ## Typical workflow
 
 Things to ask your agent once `overleaf-mcp` is connected:

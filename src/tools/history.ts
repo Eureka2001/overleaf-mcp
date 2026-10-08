@@ -9,7 +9,11 @@ import { formatHistoryDiff, renderHistoryDiff, sliceHistoryText, snapshotDiff } 
 import { HistorySession, normalizeHistoryPath, reconstructDiff, summarizeFile, summarizeLabel, summarizeUpdate, type ComparisonFile } from "../history/session.js";
 import { logger } from "../util/logger.js";
 
-const VersionRefSchema = z.union([HistoryVersionSchema, z.literal("latest")]).describe("Project history version from list_history (not read_file's OT version), or 'latest'.");
+// Some MCP clients stringify numeric values in union-typed arguments. Normalize
+// only decimal digits, then apply the same safe-integer bounds as numeric input.
+const VersionStringSchema = z.string().regex(/^\d+$/).transform(Number).pipe(HistoryVersionSchema);
+const VersionRefSchema = z.union([HistoryVersionSchema, z.literal("latest"), VersionStringSchema])
+  .describe("Project history version from list_history (not read_file's OT version): a nonnegative safe integer, its decimal string, or 'latest'.");
 const CursorInput = z.string().min(1).max(4096).optional().describe("Opaque next_cursor from this tool for the same project and arguments.");
 const MaxChars = z.number().int().min(1000).max(200_000).default(20_000).describe("Maximum returned source/diff characters, default 20000. Truncation includes an exact continuation position.");
 export const ListHistorySchema = z.object({
