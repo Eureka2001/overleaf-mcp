@@ -8,6 +8,7 @@ import type { MemberEntity } from "../api/projectTypes.js";
 import { applyOtUpdate, joinDoc, type OtUpdate } from "../api/socket.js";
 import { generateIdSeed } from "../ot/trackedChanges.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 interface FlatChange {
   change_id: string;
@@ -72,6 +73,7 @@ function flattenChanges(
 // ---------- list_tracked_changes ----------
 
 const ListSchema = z.object({
+  project_id: projectIdArg,
   author_email: z.string().optional().describe("Filter to changes by this exact author email."),
   author_id_endswith: z.string().optional().describe("Filter to changes by user_id matching this suffix (handy when you don't know the email)."),
   path_contains: z.string().optional().describe("Filter to changes in docs whose project-relative path matches this substring."),
@@ -84,6 +86,7 @@ const ListSchema = z.object({
 // ---------- accept_changes ----------
 
 const AcceptSchema = z.object({
+  project_id: projectIdArg,
   change_ids: z.array(z.string().min(8)).min(1).describe("Tracked-change ids to accept (from list_tracked_changes)."),
 });
 
@@ -132,9 +135,7 @@ export function registerTrackedChanges(server: McpServer): void {
       inputSchema: ListSchema.shape,
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open." }], isError: true };
+    projectTool("read", async (args, ap) => {
       try {
         const ranges = await fetchAllRanges(ap.projectId);
         const pathMap = docPathById(ap);
@@ -174,7 +175,7 @@ export function registerTrackedChanges(server: McpServer): void {
         logger.error("list_tracked_changes failed", msg);
         return { content: [{ type: "text", text: `Failed: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 
   server.registerTool(
@@ -185,9 +186,7 @@ export function registerTrackedChanges(server: McpServer): void {
         "Permanently accepts the specified tracked-change suggestions. The text stays in the doc; the pending-change metadata is cleared. Pass the `change_id` values from `list_tracked_changes`. Changes that span multiple docs are grouped automatically. Irreversible.",
       inputSchema: AcceptSchema.shape,
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open." }], isError: true };
+    projectTool("write", async (args, ap) => {
       try {
         // Resolve which doc each change belongs to (via ranges).
         const ranges = await fetchAllRanges(ap.projectId);
@@ -227,7 +226,7 @@ export function registerTrackedChanges(server: McpServer): void {
         logger.error("accept_changes failed", msg);
         return { content: [{ type: "text", text: `Failed: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 
   server.registerTool(
@@ -238,9 +237,7 @@ export function registerTrackedChanges(server: McpServer): void {
         "Rejects the specified tracked-change suggestions. For tracked inserts the inserted text is removed; for tracked deletes the strikethrough is cleared and the text stays. Implemented as an OT update with `u:true` flags on the inverse ops — same pathway Overleaf's web client uses. Pass the `change_id` values from `list_tracked_changes`. Irreversible.",
       inputSchema: RejectSchema.shape,
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open." }], isError: true };
+    projectTool("write", async (args, ap) => {
       try {
         // Find the full change records (need position and text to invert).
         const ranges = await fetchAllRanges(ap.projectId);
@@ -277,6 +274,6 @@ export function registerTrackedChanges(server: McpServer): void {
         logger.error("reject_changes failed", msg);
         return { content: [{ type: "text", text: `Failed: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 }

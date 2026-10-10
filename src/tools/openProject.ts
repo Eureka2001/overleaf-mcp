@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { open } from "../session/activeProject.js";
+import { projectSelector } from "../session/activeProject.js";
 import { logger } from "../util/logger.js";
 
 const Schema = z.object({
@@ -24,7 +24,7 @@ export function registerOpenProject(server: McpServer): void {
     },
     async (args) => {
       try {
-        const p = await open(args.project_id);
+        const p = await projectSelector.select(args.project_id);
         const project = p.project;
         const summary = {
           project_id: p.projectId,

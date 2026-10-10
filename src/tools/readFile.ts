@@ -3,14 +3,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { joinDoc } from "../api/socket.js";
 import { olGet, expectOk } from "../api/http.js";
-import { findByPath, resolveActiveProject } from "../session/activeProject.js";
+import { findByPath } from "../session/activeProject.js";
 import { updateDoc } from "../session/docCache.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 const Schema = z.object({
-  project_id: z.string().min(8).optional().describe(
-    "Overleaf project id from list_projects or open_project. Pass this on every call when MCP sessions may change; opens the requested project if it is not already active.",
-  ),
+  project_id: projectIdArg,
   path: z
     .string()
     .min(1)
@@ -58,17 +57,7 @@ export function registerReadFile(server: McpServer): void {
       inputSchema: Schema.shape,
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      let ap;
-      try {
-        ap = await resolveActiveProject(args.project_id);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text", text: `Failed to open requested project: ${message}` }], isError: true };
-      }
-      if (!ap) {
-        return { content: [{ type: "text", text: "No project is open in this session. Pass project_id from list_projects or open_project, or call open_project in the same session." }], isError: true };
-      }
+    projectTool("read", async (args, ap) => {
       const resolvedPath = args.path ?? ap.rootDocPath;
       if (!resolvedPath) {
         return { content: [{ type: "text", text: "No path provided and the project has no configured root doc. Pass a `path` from `list_files`." }], isError: true };
@@ -149,6 +138,6 @@ export function registerReadFile(server: McpServer): void {
         logger.error("read_file failed", msg);
         return { content: [{ type: "text", text: `Failed to read '${args.path}': ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 }

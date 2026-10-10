@@ -21,14 +21,16 @@ Working end-to-end against `overleaf.com` — 16 tools, tracked-changes edits an
 
 ## Tools
 
+Every project-scoped tool also takes an optional `project_id` — see [Project selection across MCP sessions](#project-selection-across-mcp-sessions).
+
 | Tool | Description |
 |---|---|
 | `ping` | Health check. Does not contact Overleaf. |
 | `list_projects` | Lists projects on the configured account, sorted by most recently updated. Supports `name_contains`, `include_archived`, `include_trashed`, `limit`. |
 | `open_project` | Joins a project's real-time session and caches its file tree. Returns rich metadata: `root_doc_path`, `compiler`, `spell_check_language`, `public_access_level`, owner + members (with privileges), and whether track-changes is on for your user. |
-| `list_files` | Lists the file tree. Optional `project_id` opens the requested project if needed; otherwise uses the open project. Filter by `kind` and `path_contains`. |
-| `read_file` | Reads a doc (returns text + OT version + a summary of tracked changes / comments) or a binary file (base64 + MIME). Optional `project_id` opens the requested project if needed. `path` is optional — defaults to that project's root doc. |
-| `edit_file` | Replaces a doc's contents. Computes a minimal diff via `diff-match-patch`, submits it as an OT operation, and adds `meta.tc` so the edit lands as a pending suggestion in the Review panel by default. Pass `track: "off"` to write directly or `track: "auto"` to honor the project's track-changes setting. Optional `project_id` opens the requested project if needed. `path` is optional — defaults to that project's root doc. |
+| `list_files` | Lists the file tree of the open project (cached, no network). Filter by `kind` and `path_contains`. |
+| `read_file` | Reads a doc (returns text + OT version + a summary of tracked changes / comments) or a binary file (base64 + MIME). `path` is optional — defaults to the project's root doc. |
+| `edit_file` | Replaces a doc's contents. Computes a minimal diff via `diff-match-patch`, submits it as an OT operation, and adds `meta.tc` so the edit lands as a pending suggestion in the Review panel by default. Pass `track: "off"` to write directly or `track: "auto"` to honor the project's track-changes setting. `path` is optional — defaults to the project's root doc. |
 | `find_and_replace` | Surgical edit: replace one occurrence (or all, with `replace_all: true`) of `old_string` with `new_string` without re-emitting the rest of the doc. Cheaper in tokens than `edit_file` for targeted changes and avoids whitespace drift from re-emitting surrounding text. By default `old_string` must be unique; ambiguous matches return a list of line:col locations so you can extend the match. Same `track` defaults and OT path as `edit_file`, so it lands as a pending suggestion in the Review panel. |
 | `list_tracked_changes` | Enumerates every pending tracked-change suggestion across the open project, with author name + email, doc path, op kind (insert/delete), position, op text, change_id. Filter by `author_email`, `author_id_endswith`, `path_contains`, `kind`, `text_contains`, `limit`. |
 | `accept_changes` | Accepts one or more tracked changes by `change_id` (from `list_tracked_changes`). Multi-doc groups are batched automatically. Irreversible. |
@@ -51,6 +53,31 @@ Things to ask Claude once `overleaf-mcp` is connected:
 - _"Read intro.tex and fix the missing comma in the second paragraph."_  → with track-changes on, this lands as a tracked suggestion.
 - _"Compile the project and tell me what the LaTeX errors mean."_  → uses `compile` then `read_log` automatically.
 - _"For each open comment thread, suggest a fix and reply with what you did."_  → end-to-end review workflow.
+
+### Project selection across MCP sessions
+
+An HTTP gateway may run a separate stdio server for each MCP session, so a successful
+`open_project` in one session does not select a project in another. Every project tool
+therefore accepts an optional `project_id`; if your client may reconnect or change
+sessions between calls, pass it on every call:
+
+```json
+{"name": "read_file", "arguments": {"project_id": "61d853bcbf1003100e957034", "path": "main.tex"}}
+```
+
+The tool opens the project when needed and reuses it when it is already active.
+
+Reads may switch projects, but they never silently retarget writes. A write
+(`edit_file`, `find_and_replace`, comment replies/resolution, accepting or rejecting
+changes) without `project_id` only goes to the project last confirmed by
+`open_project` or by a write that named it. After `read_file(project_id=B)` in a
+session working on project A, a bare `edit_file` is refused instead of landing in B.
+Pass `project_id` (or call `open_project`) to confirm the target. Results include
+`project_id` and `project_name`, plus a note whenever a call switched projects.
+
+Omitting `project_id` everywhere keeps the original workflow: call `open_project` first
+in the same session. Refresh your client's tool definitions after upgrading to expose
+the new parameter.
 
 ## Requirements
 
@@ -177,20 +204,3 @@ overleaf-mcp incorporates code ported from two AGPL-3.0 projects (overleaf-works
 - You can use, study, and modify overleaf-mcp freely.
 - If you redistribute it, modified or not, recipients must also receive the source under AGPL-3.0.
 - If you run a **modified** version as a network service that users interact with, you must make the modified source available to those users. Running unmodified overleaf-mcp as your own personal MCP server is unaffected.
-
-### Reading across MCP sessions
-
-An HTTP gateway may run a separate stdio server for each MCP session. A successful
-`open_project` in one session does not select a project in another. If your client
-reconnects or changes sessions between tool calls, pass `project_id` on every
-`read_file` and `list_files` call:
-
-```json
-{"name": "read_file", "arguments": {"project_id": "61d853bcbf1003100e957034", "path": "main.tex"}}
-```
-
-Both tools open the specified project when needed, including in a fresh session,
-and reuse the cached project when it already matches. Omitting `project_id`
-preserves the existing workflow: call `open_project` first in the same session.
-Other project tools, including writes, still require that workflow. Refresh your
-client's tool definitions after upgrading to expose the new parameter.
