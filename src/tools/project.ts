@@ -22,6 +22,18 @@ export type ToolResponse = {
   structuredContent?: Record<string, unknown>;
 };
 
+// One socket and one doc cache serve the whole process, so a call that switches
+// projects mid-flight would pull them out from under another call's joinDoc /
+// applyOtUpdate. Project-scoped calls (and open_project) therefore run one at a
+// time; MCP clients may issue tool calls in parallel.
+let queue: Promise<unknown> = Promise.resolve();
+
+export function withProjectLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = queue.then(fn, fn);
+  queue = run.catch(() => undefined);
+  return run;
+}
+
 /**
  * Wrap a tool handler so it runs against the resolved project. Results carry
  * `project_id` / `project_name`, and a note when the call switched projects.
@@ -30,7 +42,7 @@ export function projectTool<A extends { project_id?: string }>(
   access: ProjectAccess,
   handler: (args: A, ap: ActiveProject) => Promise<ToolResponse>,
 ): (args: A) => Promise<ToolResponse> {
-  return async (args) => {
+  return (args) => withProjectLock(async () => {
     let resolution;
     try {
       resolution = await projectSelector.resolve(args.project_id, access);
@@ -51,5 +63,5 @@ export function projectTool<A extends { project_id?: string }>(
         structuredContent: { project_id: ap.projectId, project_name: ap.name, ...res.structuredContent },
       }),
     };
-  };
+  });
 }
