@@ -3,11 +3,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { joinDoc } from "../api/socket.js";
 import { olGet, expectOk } from "../api/http.js";
-import { findByPath, getActiveProject } from "../session/activeProject.js";
+import { findByPath } from "../session/activeProject.js";
 import { updateDoc } from "../session/docCache.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 const Schema = z.object({
+  project_id: projectIdArg,
   path: z
     .string()
     .min(1)
@@ -49,17 +51,13 @@ export function registerReadFile(server: McpServer): void {
     {
       title: "Read a file from the open Overleaf project",
       description:
-        "Reads the contents of a file by project-relative path. " +
+        "Reads the contents of a file by project-relative path. Pass project_id to read without a prior open_project in this session. " +
         "For text docs (.tex, .bib, .md, etc.) the full text appears in both the `content` array and `structuredContent.text`; metadata (version, line/byte counts, ranges, tracked-change/comment counts) is in `structuredContent`. " +
         "For binary files (images, PDFs) base64 is in `content` and `structuredContent.base64`, with MIME type alongside.",
       inputSchema: Schema.shape,
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) {
-        return { content: [{ type: "text", text: "No project is open. Call open_project first." }], isError: true };
-      }
+    projectTool("read", async (args, ap) => {
       const resolvedPath = args.path ?? ap.rootDocPath;
       if (!resolvedPath) {
         return { content: [{ type: "text", text: "No path provided and the project has no configured root doc. Pass a `path` from `list_files`." }], isError: true };
@@ -140,6 +138,6 @@ export function registerReadFile(server: McpServer): void {
         logger.error("read_file failed", msg);
         return { content: [{ type: "text", text: `Failed to read '${args.path}': ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 }

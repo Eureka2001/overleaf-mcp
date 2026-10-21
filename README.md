@@ -21,6 +21,8 @@ Working end-to-end against `overleaf.com` — 16 tools, tracked-changes edits an
 
 ## Tools
 
+Every project-scoped tool also takes an optional `project_id` — see [Project selection across MCP sessions](#project-selection-across-mcp-sessions).
+
 | Tool | Description |
 |---|---|
 | `ping` | Health check. Does not contact Overleaf. |
@@ -51,6 +53,31 @@ Things to ask Claude once `overleaf-mcp` is connected:
 - _"Read intro.tex and fix the missing comma in the second paragraph."_  → with track-changes on, this lands as a tracked suggestion.
 - _"Compile the project and tell me what the LaTeX errors mean."_  → uses `compile` then `read_log` automatically.
 - _"For each open comment thread, suggest a fix and reply with what you did."_  → end-to-end review workflow.
+
+### Project selection across MCP sessions
+
+An HTTP gateway may run a separate stdio server for each MCP session, so a successful
+`open_project` in one session does not select a project in another. Every project tool
+therefore accepts an optional `project_id`; if your client may reconnect or change
+sessions between calls, pass it on every call:
+
+```json
+{"name": "read_file", "arguments": {"project_id": "61d853bcbf1003100e957034", "path": "main.tex"}}
+```
+
+The tool opens the project when needed and reuses it when it is already active.
+
+Reads may switch projects, but they never silently retarget writes. A write
+(`edit_file`, `find_and_replace`, comment replies/resolution, accepting or rejecting
+changes) without `project_id` only goes to the project last confirmed by
+`open_project` or by a write that named it. After `read_file(project_id=B)` in a
+session working on project A, a bare `edit_file` is refused instead of landing in B.
+Pass `project_id` (or call `open_project`) to confirm the target. Results include
+`project_id` and `project_name`, plus a note whenever a call switched projects.
+
+Omitting `project_id` everywhere keeps the original workflow: call `open_project` first
+in the same session. Refresh your client's tool definitions after upgrading to expose
+the new parameter.
 
 ## Requirements
 

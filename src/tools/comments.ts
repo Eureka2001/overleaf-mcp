@@ -2,9 +2,10 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { asJson, olGet, olPostJson, expectOk } from "../api/http.js";
-import { docPathById, getActiveProject } from "../session/activeProject.js";
+import { docPathById } from "../session/activeProject.js";
 import type { CommentThread, ThreadsByIdResponse, RangesResponse } from "../api/commentTypes.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 interface EnrichedThread {
   thread_id: string;
@@ -65,6 +66,7 @@ async function fetchThreadsEnriched(projectId: string, docPaths: Map<string, str
 }
 
 const ListSchema = z.object({
+  project_id: projectIdArg,
   include_resolved: z
     .boolean()
     .default(false)
@@ -74,6 +76,7 @@ const ListSchema = z.object({
 });
 
 const ThreadIdSchema = z.object({
+  project_id: projectIdArg,
   thread_id: z.string().min(8).describe("The thread id, e.g. from list_comments."),
 });
 
@@ -119,9 +122,7 @@ export function registerComments(server: McpServer): void {
       inputSchema: ListSchema.shape,
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open. Call open_project first." }], isError: true };
+    projectTool("read", async (args, ap) => {
       try {
         let threads = await fetchThreadsEnriched(ap.projectId, docPathById(ap));
         if (!args.include_resolved) threads = threads.filter((t) => !t.resolved);
@@ -142,7 +143,7 @@ export function registerComments(server: McpServer): void {
         logger.error("list_comments failed", msg);
         return { content: [{ type: "text", text: `Failed to list comments: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 
   server.registerTool(
@@ -155,9 +156,7 @@ export function registerComments(server: McpServer): void {
       inputSchema: ThreadIdSchema.shape,
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open." }], isError: true };
+    projectTool("read", async (args, ap) => {
       try {
         const r = await olGet(`project/${ap.projectId}/threads`);
         const all = await asJson<ThreadsByIdResponse>(r, "GET /threads");
@@ -173,7 +172,7 @@ export function registerComments(server: McpServer): void {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Failed to read thread: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 
   server.registerTool(
@@ -185,9 +184,7 @@ export function registerComments(server: McpServer): void {
         "The message appears immediately in Overleaf's review panel for collaborators.",
       inputSchema: ReplySchema.shape,
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open." }], isError: true };
+    projectTool("write", async (args, ap) => {
       try {
         const res = await olPostJson(`project/${ap.projectId}/thread/${args.thread_id}/messages`, { content: args.content });
         await expectOk(res, `POST /thread/${args.thread_id}/messages`);
@@ -199,7 +196,7 @@ export function registerComments(server: McpServer): void {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Failed to post reply: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 
   server.registerTool(
@@ -211,9 +208,7 @@ export function registerComments(server: McpServer): void {
         "Pass `doc_id` from list_comments to skip a lookup round-trip.",
       inputSchema: ThreadStateSchema.shape,
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open." }], isError: true };
+    projectTool("write", async (args, ap) => {
       try {
         const docId = await setThreadState(ap.projectId, args, "resolve");
         return {
@@ -224,7 +219,7 @@ export function registerComments(server: McpServer): void {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Failed to resolve: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 
   server.registerTool(
@@ -234,9 +229,7 @@ export function registerComments(server: McpServer): void {
       description: "Reopens a previously-resolved thread. Pass `doc_id` from list_comments to skip a lookup round-trip.",
       inputSchema: ThreadStateSchema.shape,
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open." }], isError: true };
+    projectTool("write", async (args, ap) => {
       try {
         const docId = await setThreadState(ap.projectId, args, "reopen");
         return {
@@ -247,6 +240,6 @@ export function registerComments(server: McpServer): void {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Failed to reopen: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 }

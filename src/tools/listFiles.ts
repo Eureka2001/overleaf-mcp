@@ -1,9 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { getActiveProject } from "../session/activeProject.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 const Schema = z.object({
+  project_id: projectIdArg,
   kind: z
     .enum(["all", "doc", "file", "folder"])
     .default("all")
@@ -18,19 +19,12 @@ export function registerListFiles(server: McpServer): void {
       title: "List files in the open Overleaf project",
       description:
         "Returns the file tree of the currently open project as a flat list of project-relative paths. " +
-        "Cheap — uses cached data from open_project, no network. " +
+        "Uses the cached file tree when the requested project is already active; otherwise project_id opens it first. " +
         "Each entity has a path (e.g. 'chapters/intro.tex'), an id, and a kind ('doc' | 'file' | 'folder').",
       inputSchema: Schema.shape,
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) {
-        return {
-          content: [{ type: "text", text: "No project is open. Call open_project first." }],
-          isError: true,
-        };
-      }
+    projectTool("read", async (args, ap) => {
       let entities = ap.entities;
       if (args.kind !== "all") entities = entities.filter((e) => e.kind === args.kind);
       if (args.path_contains) {
@@ -44,6 +38,6 @@ export function registerListFiles(server: McpServer): void {
         content: [{ type: "text", text }],
         structuredContent: { project_id: ap.projectId, count: entities.length, entities },
       };
-    },
+    }),
   );
 }
