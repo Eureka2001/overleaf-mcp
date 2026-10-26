@@ -45,6 +45,63 @@ export async function refreshProjectTree(ap: ActiveProject): Promise<void> {
   ap.trackChangesOnForMe = isTrackChangesOnForUser(project, identity.userId);
 }
 
+export type ProjectAccess = "read" | "write";
+
+export type ProjectResolution =
+  | { ok: true; ap: ActiveProject; switchedFrom?: ActiveProject }
+  | { ok: false; error: string };
+
+interface ProjectSession {
+  getActiveProject(): ActiveProject | null;
+  open(projectId: string): Promise<ActiveProject>;
+}
+
+/**
+ * Decides which project a tool call acts on. A gateway may run one server per
+ * MCP session, so every project tool accepts an explicit `project_id`. Reads
+ * with a different id may switch the active project, but they must never
+ * silently retarget writes: a write without `project_id` only proceeds on the
+ * project the agent last confirmed — via open_project or a write naming it.
+ * Re-opening that project ourselves is not an option: open() clears the doc
+ * cache, dropping the stale-read baseline edit_file relies on.
+ */
+export class ProjectSelector {
+  private writeTarget: string | null = null;
+
+  constructor(private readonly session: ProjectSession) {}
+
+  /** open_project: switch and confirm as the write target. */
+  async select(projectId: string): Promise<ActiveProject> {
+    const ap = await this.session.open(projectId);
+    this.writeTarget = ap.projectId;
+    return ap;
+  }
+
+  /** Throws only when opening an explicitly requested project fails. */
+  async resolve(projectId: string | undefined, access: ProjectAccess): Promise<ProjectResolution> {
+    const current = this.session.getActiveProject();
+    if (!projectId) {
+      if (!current) {
+        return { ok: false, error: "No project is open in this session. Pass project_id from list_projects or open_project, or call open_project in the same session." };
+      }
+      if (access === "write" && current.projectId !== this.writeTarget) {
+        return {
+          ok: false,
+          error:
+            `Active project changed to "${current.name}" (${current.projectId}) by a read. ` +
+            "Pass project_id, or call open_project, to confirm where this edit should go.",
+        };
+      }
+      return { ok: true, ap: current };
+    }
+    const ap = current?.projectId === projectId ? current : await this.session.open(projectId);
+    if (access === "write") this.writeTarget = ap.projectId;
+    return { ok: true, ap, switchedFrom: current && current !== ap ? current : undefined };
+  }
+}
+
+export const projectSelector = new ProjectSelector({ getActiveProject, open });
+
 export async function open(projectId: string): Promise<ActiveProject> {
   const { joinedProject } = await ensureSocketForProject(projectId);
   if (!joinedProject) {

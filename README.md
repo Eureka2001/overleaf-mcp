@@ -23,6 +23,8 @@ This fork ships 24 tools, including historical TeX source reading and compact ve
 
 ## Tools
 
+Every project-scoped tool also takes an optional `project_id` — see [Project selection across MCP sessions](#project-selection-across-mcp-sessions).
+
 | Tool | Description |
 |---|---|
 | `ping` | Health check. Does not contact Overleaf. |
@@ -47,8 +49,8 @@ This fork ships 24 tools, including historical TeX source reading and compact ve
 | `list_comments` | Lists review-panel comment threads with doc path, quoted text, author, latest-message preview. Supports `include_resolved`, `path_contains`, `full`. |
 | `read_comment_thread` | Returns the full message history of one thread. |
 | `reply_comment` | Posts a new message to an existing thread. |
-| `resolve_comment` | Marks a thread resolved. |
-| `reopen_comment` | Reopens a resolved thread. |
+| `resolve_comment` | Marks a thread resolved. Optional `doc_id` (from `list_comments`) skips the doc lookup. |
+| `reopen_comment` | Reopens a resolved thread. Optional `doc_id` (from `list_comments`) skips the doc lookup. |
 
 `list_history_files.history_version`, `read_history_file.history_version` and `compare_versions.to_version` accept a nonnegative safe integer, `"latest"`, or a decimal digit string such as `"9645"`. Digit strings are normalized to numbers before reading history, so clients that stringify union-typed arguments can still use fixed versions. Returned versions and pagination cursors use numbers. `compare_versions.from_version` remains a numeric integer.
 
@@ -65,6 +67,31 @@ Things to ask your agent once `overleaf-mcp` is connected:
 - _"Compile the project and tell me what the LaTeX errors mean."_  → uses `compile` then `read_log` automatically.
 - _"Compile my paper and download the PDF to an absolute path on my computer."_ → `open_project` → `compile(root_doc: "main.tex")` → `download_pdf(output_path: "D:\\papers\\paper.pdf")`. For a response letter, compile with `root_doc: "response_letter.tex"` before downloading. The destination is on the computer running the MCP server; parent directories are created. Recompile if cached build output has expired or the source has changed. Check `built_cleanly` first if a PDF with LaTeX errors is unacceptable.
 - _"For each open comment thread, suggest a fix and reply with what you did."_  → end-to-end review workflow.
+
+### Project selection across MCP sessions
+
+An HTTP gateway may run a separate stdio server for each MCP session, so a successful
+`open_project` in one session does not select a project in another. Every project tool
+therefore accepts an optional `project_id`; if your client may reconnect or change
+sessions between calls, pass it on every call:
+
+```json
+{"name": "read_file", "arguments": {"project_id": "61d853bcbf1003100e957034", "path": "main.tex"}}
+```
+
+The tool opens the project when needed and reuses it when it is already active.
+
+Reads may switch projects, but they never silently retarget writes. A write
+(`edit_file`, `find_and_replace`, comment replies/resolution, accepting or rejecting
+changes) without `project_id` only goes to the project last confirmed by
+`open_project` or by a write that named it. After `read_file(project_id=B)` in a
+session working on project A, a bare `edit_file` is refused instead of landing in B.
+Pass `project_id` (or call `open_project`) to confirm the target. Results include
+`project_id` and `project_name`, plus a note whenever a call switched projects.
+
+Omitting `project_id` everywhere keeps the original workflow: call `open_project` first
+in the same session. Refresh your client's tool definitions after upgrading to expose
+the new parameter.
 
 ## Requirements
 

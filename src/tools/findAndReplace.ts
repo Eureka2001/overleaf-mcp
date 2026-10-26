@@ -5,8 +5,10 @@ import { textToOps, type ShareJsOp } from "../ot/diff.js";
 import { TRACK_MODES } from "../ot/trackedChanges.js";
 import { prepareBaseline, resolveDocForEdit, submitAndVerify } from "../ot/editPipeline.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 const Schema = z.object({
+  project_id: projectIdArg,
   path: z
     .string()
     .min(1)
@@ -92,7 +94,7 @@ export function registerFindAndReplace(server: McpServer): void {
         "Each find_and_replace is its own round-trip with its own race window, its own tracked-change entry, and its own cache-sync cycle — calling it N times for N small changes amplifies the failure modes that one batched `edit_file` would avoid.",
       inputSchema: Schema.shape,
     },
-    async (args) => {
+    projectTool("write", async (args) => {
       const resolved = resolveDocForEdit(args.path);
       if (!resolved.ok) return resolved.response;
       const { ap, entity } = resolved.doc;
@@ -202,6 +204,6 @@ export function registerFindAndReplace(server: McpServer): void {
           isError: true,
         };
       }
-    },
+    }),
   );
 }

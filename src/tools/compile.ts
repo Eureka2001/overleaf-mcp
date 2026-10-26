@@ -2,11 +2,13 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { asJson, olGet, olPostJson, expectOk, type HttpContext } from "../api/http.js";
-import { getActiveProject, setLastCompile } from "../session/activeProject.js";
+import { setLastCompile } from "../session/activeProject.js";
 import type { CompileResponse, OutputFile } from "../api/compileTypes.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 const Schema = z.object({
+  project_id: projectIdArg,
   root_doc: z
     .string()
     .optional()
@@ -78,11 +80,7 @@ export function registerCompile(server: McpServer): void {
         "Use `read_log` for the full log when more context is needed.",
       inputSchema: Schema.shape,
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) {
-        return { content: [{ type: "text", text: "No project is open. Call open_project first." }], isError: true };
-      }
+    projectTool("read", async (args, ap) => {
       try {
         // overleaf.com now validates rootResourcePath as a required string and
         // 400s on null ("expected string, received null") — always send a
@@ -153,7 +151,7 @@ export function registerCompile(server: McpServer): void {
         logger.error("compile failed", msg);
         return { content: [{ type: "text", text: `Compile failed: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 }
 
@@ -167,12 +165,10 @@ export function registerReadLog(server: McpServer): void {
         "`compile` already includes the error count + first few errors in its response — use this only when you need more context (full log, line numbers, package warnings, etc.). " +
         "The `content` array shows a summary of `!`-prefixed error lines at the top, then the log truncated to the last 8000 chars for display. " +
         "`structuredContent.log` contains the FULL untruncated log so programmatic callers can grep / parse it.",
-      inputSchema: {},
+      inputSchema: { project_id: projectIdArg },
       annotations: { readOnlyHint: true },
     },
-    async () => {
-      const ap = getActiveProject();
-      if (!ap) return { content: [{ type: "text", text: "No project is open." }], isError: true };
+    projectTool("read", async (_args, ap) => {
       const last = ap.lastCompile;
       if (!last) {
         return { content: [{ type: "text", text: "No compile has been run for the open project yet. Call `compile` first." }], isError: true };
@@ -212,6 +208,6 @@ export function registerReadLog(server: McpServer): void {
         logger.error("read_log failed", msg);
         return { content: [{ type: "text", text: `Failed to fetch output.log: ${msg}` }], isError: true };
       }
-    },
+    }),
   );
 }
