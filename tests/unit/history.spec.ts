@@ -64,6 +64,7 @@ interface FixtureOptions {
   onRequest?: (url: URL) => void;
   timeoutMs?: number;
   maxJsonBytes?: number;
+  extraDeps?: Partial<Parameters<typeof createHistoryHandlers>[0]>;
 }
 async function fixture(options: FixtureOptions = {}) {
   const requests: { method: string; url: URL; cookie: string | undefined }[] = [];
@@ -84,7 +85,7 @@ async function fixture(options: FixtureOptions = {}) {
     options.onRequest?.(url);
     if (options.intercept?.(url, req, res)) return;
     const send = (body: unknown, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
-    const endpoint = url.pathname.replace(`/project/${PROJECT}/`, "");
+    const endpoint = url.pathname.replace(/^\/project\/[a-f\d]{24}\//, "");
     if (req.method !== "GET") { send({ unexpected_write: true }, 405); return; }
     if (endpoint === "updates") {
       const before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : Infinity;
@@ -114,7 +115,9 @@ async function fixture(options: FixtureOptions = {}) {
   const ap = project(options.missingFeature ? undefined : options.versioning ?? true);
   if (options.missingFeature) delete ap.project.features;
   let active: ActiveProject | null = ap;
-  const handlers = createHistoryHandlers({ getProject: () => active, createClient: () => client, now: () => NOW });
+  const handlers = createHistoryHandlers({ getProject: () => active,
+    createClient: (target) => new HistoryClient(target.projectId, { context, timeoutMs: options.timeoutMs, maxJsonBytes: options.maxJsonBytes }),
+    now: () => NOW, ...options.extraDeps });
   return { requests, client, context, handlers, ap, switchProject: (next: ActiveProject | null) => { active = next; } };
 }
 function payload(result: Awaited<ReturnType<ReturnType<typeof createHistoryHandlers>["list_history"]>>): any {
@@ -580,5 +583,29 @@ describe("history access and transport boundaries", () => {
   it("requires an open project before any history request", async () => {
     const handlers = createHistoryHandlers({ getProject: () => null });
     assert.equal(errorCode(await handlers.list_history({})), "NO_PROJECT");
+  });
+  it("resolves a foreign project_id through a detached snapshot without switching the active project", async () => {
+    const OTHER = "b".repeat(24);
+    const snapshotFor: string[] = [];
+    const f = await fixture({ extraDeps: { fetchSnapshot: async (projectId) => {
+      snapshotFor.push(projectId);
+      return { _id: projectId, name: "detached", rootFolder: [], features: { versioning: true } };
+    } } });
+    const result = await f.handlers.list_history({ project_id: OTHER, mode: "labels" });
+    const summary = payload(result);
+    assert.deepEqual(snapshotFor, [OTHER]);
+    assert.equal(summary.project_id, OTHER);
+    assert.equal(summary.history_access, "full");
+    assert.equal(f.ap.projectId, PROJECT, "the active project must stay open");
+    assert.ok(result.structuredContent);
+  });
+  it("keeps using the active project when project_id matches it or is omitted", async () => {
+    const f = await fixture({ extraDeps: { fetchSnapshot: async () => { throw new Error("must not fetch a snapshot"); } } });
+    const summary = payload(await f.handlers.list_history({ project_id: PROJECT, mode: "labels" }));
+    assert.equal(summary.project_id, PROJECT);
+  });
+  it("surfaces snapshot failures for an unreachable foreign project", async () => {
+    const f = await fixture({ extraDeps: { fetchSnapshot: async () => { throw new OverleafAuthError("login redirect"); } } });
+    assert.equal(errorCode(await f.handlers.list_history({ project_id: "c".repeat(24) })), "AUTHENTICATION_REQUIRED");
   });
 });

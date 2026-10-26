@@ -6,8 +6,9 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { asJson, expectOk, olDelete, olGet, olPostJson, olPostMultipart } from "../api/http.js";
-import { getActiveProject, refreshProjectTree, type ActiveProject } from "../session/activeProject.js";
+import { refreshProjectTree, type ActiveProject } from "../session/activeProject.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const ASSET_MIMES: Record<string, string> = {
@@ -19,6 +20,7 @@ const ASSET_MIMES: Record<string, string> = {
 };
 
 const Schema = z.object({
+  project_id: projectIdArg,
   local_path: z.string().min(1).describe("Absolute local path on the MCP server's computer to an image, PDF, vector graphic or font asset (up to 50 MiB). Text documents are not supported; use tracked edit_file/find_and_replace for those."),
   project_path: z.string().min(1).optional().describe("Project-relative destination including the filename, e.g. 'img/error-analysis.pdf'. Defaults to the local basename at project root. Use forward slashes; parent folders must already exist."),
   overwrite: z.boolean().default(false).describe("Explicitly allow replacing an existing binary asset. Defaults to false; a temporary upload plus conflict-checked rename prevents overwriting a file created concurrently."),
@@ -171,9 +173,7 @@ export function registerUploadFile(server: McpServer): void {
       "Verifies downloaded remote bytes against the source, refreshes the cached file tree, and removes only its own temporary asset on failure. " +
       "Binary assets do not produce text-review suggestions; use tracked edits to update LaTeX references, then compile.",
     inputSchema: Schema.shape,
-  }, async (args) => {
-    const ap = getActiveProject();
-    if (!ap) return { content: [{ type: "text", text: "No project is open. Call open_project first." }], isError: true };
+  }, projectTool("write", async (args, ap) => {
     try {
       const mime = assetMime(args.local_path);
       const path = args.project_path ?? basename(args.local_path);
@@ -189,5 +189,5 @@ export function registerUploadFile(server: McpServer): void {
       logger.error("upload_file failed", msg);
       return { content: [{ type: "text", text: `Asset upload failed: ${msg}` }], isError: true };
     }
-  });
+  }));
 }

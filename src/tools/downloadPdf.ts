@@ -5,11 +5,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { expectOk, olGet } from "../api/http.js";
-import { getActiveProject } from "../session/activeProject.js";
 import { buildOutputUrl } from "./compile.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 const Schema = z.object({
+  project_id: projectIdArg,
   output_path: z
     .string()
     .min(1)
@@ -67,19 +68,15 @@ export function registerDownloadPdf(server: McpServer): void {
     {
       title: "Download the last compiled PDF",
       description:
-        "Downloads output.pdf from the most recent compile of the open project in this MCP session, " +
+        "Downloads output.pdf from the most recent compile of a project in this MCP session (the active project, or the one named by project_id), " +
         "using the existing authenticated Overleaf connection, and saves it to an absolute local output_path. " +
-        "Call open_project, then compile (with root_doc if needed), then download_pdf in the same session. " +
+        "Call compile (with root_doc if needed) for that project, then download_pdf in the same session. " +
         "This does not recompile: edits made after that compile are not included. A partial PDF from a compile with LaTeX errors can also be downloaded; check compile.built_cleanly first. " +
         "Checks the PDF signature, creates parent directories, and refuses to overwrite existing files unless overwrite is true. " +
         "If cached build output has expired, re-run compile before downloading.",
       inputSchema: Schema.shape,
     },
-    async (args) => {
-      const ap = getActiveProject();
-      if (!ap) {
-        return { content: [{ type: "text", text: "No project is open. Call open_project first." }], isError: true };
-      }
+    projectTool("read", async (args, ap) => {
       const last = ap.lastCompile;
       if (!last) {
         return { content: [{ type: "text", text: "No compile has been run for the open project in this session. Call compile first." }], isError: true };
@@ -113,6 +110,6 @@ export function registerDownloadPdf(server: McpServer): void {
         logger.error("download_pdf failed", msg);
         return { content: [{ type: "text", text }], isError: true };
       }
-    },
+    }),
   );
 }

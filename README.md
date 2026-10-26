@@ -17,7 +17,7 @@ The [`overleaf-workshop`](https://github.com/overleaf-workshop/overleaf-workshop
 
 ## Why a new fork
 
-This repository is a fork of [netique/overleaf-mcp](https://github.com/netique/overleaf-mcp) and continues its development here. Upstream no longer appears to be actively maintained, so changes in this repository will not be regularly merged back or contributed upstream — many thanks to the upstream project for the foundation it provided.
+This repository is a fork of [netique/overleaf-mcp](https://github.com/netique/overleaf-mcp) and continues its development here. Upstream was dormant for a while and has since picked up development again; this fork tracks upstream and contributes changes back as pull requests where the work is a good fit — many thanks to the upstream project for the foundation it provided.
 
 This fork ships 24 tools, including historical TeX source reading and compact version comparisons, compiled PDF download, asset upload, and project-wide search.
 
@@ -82,12 +82,17 @@ sessions between calls, pass it on every call:
 The tool opens the project when needed and reuses it when it is already active.
 
 Reads may switch projects, but they never silently retarget writes. A write
-(`edit_file`, `find_and_replace`, comment replies/resolution, accepting or rejecting
+(`edit_file`, `find_and_replace`, `upload_file`, comment replies/resolution, accepting or rejecting
 changes) without `project_id` only goes to the project last confirmed by
 `open_project` or by a write that named it. After `read_file(project_id=B)` in a
 session working on project A, a bare `edit_file` is refused instead of landing in B.
 Pass `project_id` (or call `open_project`) to confirm the target. Results include
 `project_id` and `project_name`, plus a note whenever a call switched projects.
+
+The history tools (`list_history`, `list_history_files`, `read_history_file`,
+`compare_versions`) treat `project_id` as a pure data selector: naming another
+project reads its history through a detached snapshot and leaves the open editing
+session — its socket, doc cache and pinned baselines — completely untouched.
 
 Omitting `project_id` everywhere keeps the original workflow: call `open_project` first
 in the same session. Refresh your client's tool definitions after upgrading to expose

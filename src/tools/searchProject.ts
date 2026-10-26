@@ -2,10 +2,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { joinDoc } from "../api/socket.js";
-import { getActiveProject, refreshProjectTree, type ActiveProject } from "../session/activeProject.js";
+import { refreshProjectTree, type ActiveProject } from "../session/activeProject.js";
 import { logger } from "../util/logger.js";
+import { projectIdArg, projectTool } from "./project.js";
 
 const Schema = z.object({
+  project_id: projectIdArg,
   query: z.string().min(1).max(1000).describe("Literal text to find; LaTeX backslashes and regex punctuation are matched literally. May span lines."),
   case_sensitive: z.boolean().default(false).describe("Match letter case exactly. Defaults to case-insensitive search."),
   path_contains: z.string().optional().describe("Case-insensitive substring filter on project-relative document paths, e.g. 'sec/' or '.bib'."),
@@ -120,9 +122,7 @@ export function registerSearchProject(server: McpServer): void {
       "Binary assets are skipped. Does not change text or read_file's cached edit baselines; call read_file before editing a match.",
     inputSchema: Schema.shape,
     annotations: { readOnlyHint: true },
-  }, async (args) => {
-    const ap = getActiveProject();
-    if (!ap) return { content: [{ type: "text", text: "No project is open. Call open_project first." }], isError: true };
+  }, projectTool("read", async (args, ap) => {
     try {
       await refreshProjectTree(ap);
       const summary = await searchDocuments(ap, args);
@@ -138,5 +138,5 @@ export function registerSearchProject(server: McpServer): void {
       logger.error("search_project failed", msg);
       return { content: [{ type: "text", text: `Project search failed: ${msg}` }], isError: true };
     }
-  });
+  }));
 }

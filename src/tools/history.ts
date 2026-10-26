@@ -3,7 +3,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { HistoryClient, HistoryError } from "../api/history.js";
 import { HistoryVersionSchema, type HistoryChunk } from "../api/historyTypes.js";
 import { OverleafAuthError, OverleafProtocolError } from "../api/errors.js";
+import { fetchProjectSnapshot } from "../api/socket.js";
+import type { ProjectEntity } from "../api/projectTypes.js";
 import { getActiveProject, type ActiveProject } from "../session/activeProject.js";
+import { projectIdArg } from "./project.js";
 import { decodeCursor, encodeCursor, fitPage } from "../history/cursor.js";
 import { formatHistoryDiff, renderHistoryDiff, sliceHistoryText, snapshotDiff } from "../history/diff.js";
 import { HistorySession, normalizeHistoryPath, reconstructDiff, summarizeFile, summarizeLabel, summarizeUpdate, type ComparisonFile } from "../history/session.js";
@@ -17,16 +20,19 @@ const VersionRefSchema = z.union([HistoryVersionSchema, z.literal("latest"), Ver
 const CursorInput = z.string().min(1).max(4096).optional().describe("Opaque next_cursor from this tool for the same project and arguments.");
 const MaxChars = z.number().int().min(1000).max(200_000).default(20_000).describe("Maximum returned source/diff characters, default 20000. Truncation includes an exact continuation position.");
 export const ListHistorySchema = z.object({
+  project_id: projectIdArg,
   mode: z.enum(["updates", "labels"]).default("updates").describe("List grouped edits, or named versions/labels with their history_version."),
   cursor: CursorInput,
   limit: z.number().int().min(1).max(100).default(20).describe("Maximum entries to return; server pages may be larger and are safely repaginated."),
 });
 export const ListHistoryFilesSchema = z.object({
+  project_id: projectIdArg,
   history_version: VersionRefSchema,
   cursor: CursorInput,
   limit: z.number().int().min(1).max(500).default(100).describe("Maximum historical files to return."),
 });
 export const ReadHistoryFileSchema = z.object({
+  project_id: projectIdArg,
   history_version: VersionRefSchema,
   path: z.string().min(1).max(2048).describe("File path at that history version, from list_history_files; use forward slashes."),
   start_line: z.number().int().min(1).default(1).describe("One-based first line to read."),
@@ -35,6 +41,7 @@ export const ReadHistoryFileSchema = z.object({
   max_chars: MaxChars,
 });
 export const CompareVersionsSchema = z.object({
+  project_id: projectIdArg,
   from_version: HistoryVersionSchema.describe("Older project history version from list_history or its labels."),
   to_version: VersionRefSchema.default("latest"),
   path: z.string().min(1).max(2048).optional().describe("Omit for changed-file metadata only. To view compact text changes, pass comparison_path from the overview (or an unambiguous old/new path)."),
@@ -53,6 +60,7 @@ interface ToolResult {
 export interface HistoryToolDependencies {
   getProject?: () => ActiveProject | null;
   createClient?: (ap: ActiveProject) => HistoryClient;
+  fetchSnapshot?: (projectId: string) => Promise<ProjectEntity>;
   now?: () => number;
 }
 const success = (payload: Record<string, unknown>, text?: string): ToolResult => ({
@@ -71,20 +79,45 @@ function failure(err: unknown): ToolResult {
 
 export function createHistoryHandlers(deps: HistoryToolDependencies = {}) {
   const getProject = deps.getProject ?? getActiveProject;
-  const run = async (action: (session: HistorySession) => Promise<ToolResult>): Promise<ToolResult> => {
-    const ap = getProject();
-    if (!ap) return failure(new HistoryError("NO_PROJECT", "No project is open. Call open_project first."));
+  const fetchSnapshot = deps.fetchSnapshot ?? fetchProjectSnapshot;
+  // History reads never touch the live socket, the doc cache or lastCompile,
+  // so a project_id naming another project resolves through a detached
+  // short-lived snapshot instead of switching the active project (which would
+  // clear the editing baselines read_file pinned). A detached read therefore
+  // never confirms a write target either.
+  const detach = (snapshot: ProjectEntity): ActiveProject => ({
+    projectId: snapshot._id,
+    name: snapshot.name ?? "(unnamed)",
+    project: snapshot,
+    entities: [],
+    trackChangesOnForMe: false,
+  });
+  const run = async <S extends z.ZodTypeAny>(
+    input: unknown,
+    schema: S,
+    action: (session: HistorySession, args: z.infer<S> & { project_id?: string }) => Promise<ToolResult>,
+  ): Promise<ToolResult> => {
+    let args: z.infer<S> & { project_id?: string };
+    try { args = schema.parse(input) as typeof args; } catch (err) { return failure(err); }
+    const active = getProject();
+    const ap = !args.project_id || active?.projectId === args.project_id ? active : null;
+    const detached = !ap && Boolean(args.project_id);
+    let project = ap;
+    if (detached && args.project_id) {
+      try { project = detach(await fetchSnapshot(args.project_id)); }
+      catch (err) { return failure(err); }
+    }
+    if (!project) return failure(new HistoryError("NO_PROJECT", "No project is open. Pass project_id from list_projects, or call open_project first."));
     try {
-      const session = new HistorySession(ap, deps.createClient?.(ap), deps.now?.());
-      const result = await action(session);
-      if (getProject() !== ap) throw new HistoryError("PROJECT_CHANGED", "The active project changed during this history read. Reopen the intended project and retry.");
+      const session = new HistorySession(project, deps.createClient?.(project), deps.now?.());
+      const result = await action(session, args);
+      if (!detached && getProject() !== project) throw new HistoryError("PROJECT_CHANGED", "The active project changed during this history read. Reopen the intended project and retry.");
       return result;
     } catch (err) { return failure(err); }
   };
 
   return {
-    list_history: (input: unknown) => run(async (session) => {
-      const args = ListHistorySchema.parse(input);
+    list_history: (input: unknown) => run(input, ListHistorySchema, async (session, args) => {
       const cursor = decodeCursor(args.cursor, session.projectId, args.mode);
       if (args.mode === "labels") {
         const labels = (await session.labels()).sort((a, b) => b.version - a.version || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -117,8 +150,7 @@ export function createHistoryHandlers(deps: HistoryToolDependencies = {}) {
         ...(page.updates.length ? {} : { notice: "No updates returned; the project may have no history or use disabled/legacy history." }) });
     }),
 
-    list_history_files: (input: unknown) => run(async (session) => {
-      const args = ListHistoryFilesSchema.parse(input);
+    list_history_files: (input: unknown) => run(input, ListHistoryFilesSchema, async (session, args) => {
       const cursor = decodeCursor(args.cursor, session.projectId, "files");
       if (cursor?.kind === "files" && args.history_version !== "latest" && args.history_version !== cursor.version) throw new HistoryError("INVALID_CURSOR", "Use the same history_version with this file cursor.");
       const version = await session.resolveVersion(cursor?.kind === "files" ? cursor.version : args.history_version);
@@ -132,8 +164,7 @@ export function createHistoryHandlers(deps: HistoryToolDependencies = {}) {
         next_cursor: nextOffset < files.length ? encodeCursor({ kind: "files", project_id: session.projectId, version, offset: nextOffset }) : null });
     }),
 
-    read_history_file: (input: unknown) => run(async (session) => {
-      const args = ReadHistoryFileSchema.parse(input);
+    read_history_file: (input: unknown) => run(input, ReadHistoryFileSchema, async (session, args) => {
       const version = await session.resolveVersion(args.history_version);
       const path = normalizeHistoryPath(args.path);
       const text = await session.snapshot(version, path);
@@ -142,8 +173,7 @@ export function createHistoryHandlers(deps: HistoryToolDependencies = {}) {
       return success(payload, slice.text + (slice.truncated ? `\n\n[Truncated. Continue at history_version=${version}, start_line=${slice.next_start_line}, start_column=${slice.next_start_column}.]` : ""));
     }),
 
-    compare_versions: (input: unknown) => run(async (session) => {
-      const args = CompareVersionsSchema.parse(input);
+    compare_versions: (input: unknown) => run(input, CompareVersionsSchema, async (session, args) => {
       const path = args.path === undefined ? undefined : normalizeHistoryPath(args.path);
       const cursor = decodeCursor(args.cursor, session.projectId, path === undefined ? "compare" : "diff");
       if ((cursor?.kind === "compare" || cursor?.kind === "diff") &&
@@ -243,7 +273,8 @@ export function registerHistory(server: McpServer): void {
   server.registerTool("list_history", {
     title: "List project history or labeled versions",
     description: "Lists grouped project history or named versions, with history version numbers, dates, authors and changed paths. " +
-      "Requires open_project. Uses bounded pagination; pass next_cursor for more. History versions differ from document OT versions. " +
+      "Requires open_project or project_id; a project_id naming another project is read through a detached snapshot without switching the editing session. " +
+      "Uses bounded pagination; pass next_cursor for more. History versions differ from document OT versions. " +
       "Respects full-history access or the recent/labeled-version range; does not modify the project.",
     inputSchema: ListHistorySchema.shape, annotations: { readOnlyHint: true },
   }, handlers.list_history);
